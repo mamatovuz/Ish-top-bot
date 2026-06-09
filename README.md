@@ -14,12 +14,16 @@ Telegram orqali ish qidiruvchi va ish beruvchilarni bog'laydigan bot. Bot aiogra
   - kanal qo'shish/o'chirish
   - obuna bo'lmaguncha bot ishlamaydi
 - Ish qidiruvchi anketasi:
-  - foto, ism familiya, yosh, jins, qo'lda telefon, hudud
+  - foto, ism familiya, tug'ilgan sana `kun.oy.yil`, jins, qo'lda telefon, hudud
   - admin qo'shadigan kasb
   - ish turi: Offline, Online, Gibrid, Farqi yo'q
   - tajriba matni va tajriba yili
   - tugma orqali ma'lumot darajasi
-  - oldingi ish joyi, maosh matni va maosh raqami, qo'shimcha ma'lumot
+  - Excel va Word bilish darajasi
+  - oldingi ish joyi
+  - oldingi ish joyidagi oylik
+  - hozir olayotgan oylik
+  - qisqa qo'shimcha ma'lumot
   - ixtiyoriy rezyume fayl
   - tasdiqlash va admin moderatsiyasiga yuborish
 - Ish qidiruvchi profili:
@@ -57,6 +61,8 @@ Telegram orqali ish qidiruvchi va ish beruvchilarni bog'laydigan bot. Bot aiogra
   - keng Excel eksport: nomzodlar, vakansiyalar, ish beruvchilar, qiziqishlar, saralashlar, admin log
   - anti-spam cheklovlari
   - admin log: muhim admin amallari saqlanadi
+  - SQLite backup olish
+  - ommaviy xabarni oldin ko'rish, keyin tasdiqlab yuborish
   - majburiy obuna
   - kasblar qo'shish/tahrirlash/o'chirish
   - ommaviy xabar
@@ -78,11 +84,32 @@ BOT_TOKEN=telegram_bot_tokeningiz
 ADMIN_IDS=123456789
 PUBLIC_CHANNEL_ID=@ish_elonlari
 DATABASE_PATH=data/bot.sqlite3
+BACKUP_DIR=backups
 ```
 
 `ADMIN_IDS` uchun o'zingizning Telegram ID raqamingizni yozing. Bir nechta admin bo'lsa vergul bilan ajrating.
 
 `PUBLIC_CHANNEL_ID` nomzodlar va vakansiyalar chiqadigan kanal. Bot shu kanalga admin qilingan bo'lishi kerak.
+
+## Ma'lumotlar O'chib Ketmasligi
+
+Bot barcha foydalanuvchi, ariza, vakansiya va admin ma'lumotlarini SQLite bazada saqlaydi:
+
+```text
+data/bot.sqlite3
+```
+
+Yangilash paytida `data/` papkasini va `.env` faylini o'chirmang. Kod fayllarini yangilasangiz ham baza shu joyda qolsa, ma'lumotlar saqlanadi.
+
+Bot ishga tushganda avtomatik backup oladi:
+
+```text
+backups/
+```
+
+Admin panelda `💾 Backup` tugmasi bor. Admin shu tugmani bosib SQLite bazaning nusxasini Telegram orqali fayl sifatida oladi.
+
+GitHubga `.env`, `data/`, `generated/` va `backups/` papkalari chiqmaydi. Bu token, baza va backup fayllarni himoya qiladi.
 
 3. Botni ishga tushiring:
 

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from config import DATABASE_PATH
+from config import BACKUP_DIR, DATABASE_PATH
 
 
 DEFAULT_PROFESSIONS = ("Dasturchi", "Operator", "Sotuvchi", "Dizayner")
@@ -20,6 +20,7 @@ def days_from_now_iso(days: int) -> str:
 class Database:
     def __init__(self, path: Path = DATABASE_PATH) -> None:
         self.path = path
+        self.backup_dir = BACKUP_DIR
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
@@ -27,6 +28,7 @@ class Database:
         self.conn.execute("PRAGMA journal_mode = WAL")
 
     def init(self) -> None:
+        self.create_backup("startup", keep_last=20)
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS settings (
@@ -153,12 +155,55 @@ class Database:
                 details TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS moderation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_type TEXT NOT NULL,
+                item_id INTEGER NOT NULL,
+                admin_tg_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(item_type, item_id, admin_tg_id, message_id)
+            );
             """
         )
         self.set_setting_default("force_subscription", "0")
         self._migrate_schema()
         self._seed_professions()
         self.conn.commit()
+
+    def create_backup(self, reason: str = "manual", keep_last: int = 20) -> Path | None:
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return None
+
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        safe_reason = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in reason).strip("_")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = self.backup_dir / f"{self.path.stem}_{safe_reason}_{stamp}.sqlite3"
+
+        backup_conn = sqlite3.connect(backup_path)
+        try:
+            self.conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+
+        self._cleanup_backups(keep_last)
+        return backup_path
+
+    def _cleanup_backups(self, keep_last: int) -> None:
+        if keep_last <= 0 or not self.backup_dir.exists():
+            return
+        backups = sorted(
+            self.backup_dir.glob(f"{self.path.stem}_*.sqlite3"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for old_backup in backups[keep_last:]:
+            try:
+                old_backup.unlink()
+            except OSError:
+                pass
 
     def _columns(self, table: str) -> set[str]:
         return {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -170,8 +215,15 @@ class Database:
     def _migrate_schema(self) -> None:
         self._add_column_if_missing("seekers", "resume_file_id", "TEXT")
         self._add_column_if_missing("seekers", "resume_file_name", "TEXT")
+        self._add_column_if_missing("seekers", "birth_date", "TEXT")
         self._add_column_if_missing("seekers", "job_type", "TEXT")
         self._add_column_if_missing("seekers", "experience_years", "INTEGER")
+        self._add_column_if_missing("seekers", "excel_level", "TEXT")
+        self._add_column_if_missing("seekers", "word_level", "TEXT")
+        self._add_column_if_missing("seekers", "previous_salary", "TEXT")
+        self._add_column_if_missing("seekers", "previous_salary_amount", "INTEGER")
+        self._add_column_if_missing("seekers", "current_salary", "TEXT")
+        self._add_column_if_missing("seekers", "current_salary_amount", "INTEGER")
         self._add_column_if_missing("seekers", "salary_amount", "INTEGER")
         self._add_column_if_missing("seekers", "moderation_status", "TEXT NOT NULL DEFAULT 'pending'")
         self._add_column_if_missing("seekers", "moderation_note", "TEXT")
@@ -290,6 +342,42 @@ class Database:
             (limit,),
         ).fetchall()
 
+    def save_moderation_message(
+        self,
+        item_type: str,
+        item_id: int,
+        admin_tg_id: int,
+        chat_id: int,
+        message_id: int,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO moderation_messages(
+                item_type, item_id, admin_tg_id, chat_id, message_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (item_type, item_id, admin_tg_id, chat_id, message_id, now_iso()),
+        )
+        self.conn.commit()
+
+    def list_moderation_messages(self, item_type: str, item_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT * FROM moderation_messages
+            WHERE item_type = ? AND item_id = ?
+            ORDER BY id
+            """,
+            (item_type, item_id),
+        ).fetchall()
+
+    def delete_moderation_messages(self, item_type: str, item_id: int) -> None:
+        self.conn.execute(
+            "DELETE FROM moderation_messages WHERE item_type = ? AND item_id = ?",
+            (item_type, item_id),
+        )
+        self.conn.commit()
+
     def upsert_user(self, tg_id: int, username: str | None, full_name: str, role: str | None = None) -> None:
         current = self.conn.execute("SELECT role FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
         saved_role = role if role is not None else (current["role"] if current else None)
@@ -380,12 +468,14 @@ class Database:
             """
             INSERT INTO seekers(
                 telegram_id, photo_id, full_name, age, gender, phone, region,
-                profession_id, profession_title, job_type, experience, experience_years, education,
-                previous_job, salary, extra, resume_file_id, resume_file_name,
-                salary_amount, moderation_status, moderation_note, moderated_by, approved_at, published_at,
+                birth_date, profession_id, profession_title, job_type, experience, experience_years,
+                education, excel_level, word_level, previous_job,
+                previous_salary, previous_salary_amount, current_salary, current_salary_amount,
+                salary, salary_amount, extra, resume_file_id, resume_file_name,
+                moderation_status, moderation_note, moderated_by, approved_at, published_at,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 photo_id = excluded.photo_id,
                 full_name = excluded.full_name,
@@ -393,13 +483,20 @@ class Database:
                 gender = excluded.gender,
                 phone = excluded.phone,
                 region = excluded.region,
+                birth_date = excluded.birth_date,
                 profession_id = excluded.profession_id,
                 profession_title = excluded.profession_title,
                 job_type = excluded.job_type,
                 experience = excluded.experience,
                 experience_years = excluded.experience_years,
                 education = excluded.education,
+                excel_level = excluded.excel_level,
+                word_level = excluded.word_level,
                 previous_job = excluded.previous_job,
+                previous_salary = excluded.previous_salary,
+                previous_salary_amount = excluded.previous_salary_amount,
+                current_salary = excluded.current_salary,
+                current_salary_amount = excluded.current_salary_amount,
                 salary = excluded.salary,
                 extra = excluded.extra,
                 resume_file_id = excluded.resume_file_id,
@@ -420,18 +517,25 @@ class Database:
                 data["gender"],
                 data["phone"],
                 data["region"],
+                data.get("birth_date"),
                 data.get("profession_id"),
                 data["profession_title"],
                 data.get("job_type"),
                 data["experience"],
                 data.get("experience_years"),
                 data.get("education"),
+                data.get("excel_level"),
+                data.get("word_level"),
                 data["previous_job"],
-                data["salary"],
+                data.get("previous_salary"),
+                data.get("previous_salary_amount"),
+                data.get("current_salary"),
+                data.get("current_salary_amount"),
+                data.get("salary") or data.get("current_salary"),
+                data.get("salary_amount") or data.get("current_salary_amount"),
                 data.get("extra"),
                 data.get("resume_file_id"),
                 data.get("resume_file_name"),
-                data.get("salary_amount"),
                 stamp,
                 stamp,
             ),
@@ -452,6 +556,7 @@ class Database:
             "photo_id",
             "full_name",
             "age",
+            "birth_date",
             "gender",
             "phone",
             "region",
@@ -461,7 +566,13 @@ class Database:
             "experience",
             "experience_years",
             "education",
+            "excel_level",
+            "word_level",
             "previous_job",
+            "previous_salary",
+            "previous_salary_amount",
+            "current_salary",
+            "current_salary_amount",
             "salary",
             "salary_amount",
             "extra",
@@ -527,6 +638,30 @@ class Database:
             (status, note, moderated_by, approved_at, stamp, seeker_id),
         )
         self.conn.commit()
+
+    def set_seeker_moderation_status_if_pending(
+        self,
+        seeker_id: int,
+        status: str,
+        note: str | None = None,
+        moderated_by: int | None = None,
+    ) -> bool:
+        stamp = now_iso()
+        approved_at = stamp if status == "approved" else None
+        cur = self.conn.execute(
+            """
+            UPDATE seekers
+            SET moderation_status = ?,
+                moderation_note = ?,
+                moderated_by = ?,
+                approved_at = ?,
+                updated_at = ?
+            WHERE id = ? AND moderation_status = 'pending'
+            """,
+            (status, note, moderated_by, approved_at, stamp, seeker_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def mark_seeker_published(
         self,
@@ -702,6 +837,30 @@ class Database:
             (status, note, moderated_by, approved_at, stamp, vacancy_id),
         )
         self.conn.commit()
+
+    def set_vacancy_moderation_status_if_pending(
+        self,
+        vacancy_id: int,
+        status: str,
+        note: str | None = None,
+        moderated_by: int | None = None,
+    ) -> bool:
+        stamp = now_iso()
+        approved_at = stamp if status == "approved" else None
+        cur = self.conn.execute(
+            """
+            UPDATE vacancies
+            SET moderation_status = ?,
+                moderation_note = ?,
+                moderated_by = ?,
+                approved_at = ?,
+                updated_at = ?
+            WHERE id = ? AND moderation_status = 'pending'
+            """,
+            (status, note, moderated_by, approved_at, stamp, vacancy_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def mark_vacancy_published(
         self,

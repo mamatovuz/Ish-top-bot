@@ -26,6 +26,7 @@ from keyboards import (
     admin_professions_keyboard,
     admin_subscription_keyboard,
     admin_users_keyboard,
+    broadcast_preview_keyboard,
     broadcast_target_keyboard,
     candidate_filter_keyboard,
     candidate_offer_keyboard,
@@ -46,7 +47,9 @@ from keyboards import (
     seeker_edit_fields_keyboard,
     seeker_moderation_keyboard,
     seeker_profile_keyboard,
+    skill_level_keyboard,
     skip_menu,
+    skip_inline_keyboard,
     subscription_keyboard,
     vacancy_admin_keyboard,
     vacancy_confirm_keyboard,
@@ -72,7 +75,7 @@ def menu_for(user_id: int):
 class SeekerForm(StatesGroup):
     photo = State()
     full_name = State()
-    age = State()
+    birth_date = State()
     gender = State()
     phone = State()
     region = State()
@@ -80,8 +83,11 @@ class SeekerForm(StatesGroup):
     job_type = State()
     experience = State()
     education = State()
+    excel_level = State()
+    word_level = State()
     previous_job = State()
-    salary = State()
+    previous_salary = State()
+    current_salary = State()
     extra = State()
     resume = State()
     confirm = State()
@@ -217,6 +223,23 @@ def day_start_iso() -> str:
     return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
 
 
+def parse_birth_date(text: Any) -> tuple[str, int] | None:
+    raw = clean_text(text, "")
+    match = re.fullmatch(r"\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4})\s*", raw)
+    if not match:
+        return None
+    day, month, year = map(int, match.groups())
+    try:
+        birth = datetime(year, month, day)
+    except ValueError:
+        return None
+    today = datetime.now()
+    age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+    if age < 14 or age > 90:
+        return None
+    return birth.strftime("%d.%m.%Y"), age
+
+
 def public_channel_id() -> str:
     return db.get_setting("public_channel_id", "") or PUBLIC_CHANNEL_ID
 
@@ -306,10 +329,12 @@ def seeker_card(seeker: Any, *, hide_phone: bool = True) -> str:
     phone = "yashirilgan" if hide_phone else row_get(seeker, "phone")
     resume = "bor" if row_get(seeker, "resume_file_id") else "yo'q"
     note = row_get(seeker, "moderation_note", "")
+    birth_date = row_get(seeker, "birth_date", "")
     return (
         f"📄 <b>Nomzod #{row_get(seeker, 'id')}</b>\n"
         f"👤 {esc(row_get(seeker, 'full_name'))}\n"
-        f"🎂 {esc(row_get(seeker, 'age'))} yosh\n"
+        f"🎂 Tug'ilgan sana: {esc(birth_date or '-')}"
+        f"{' (' + esc(row_get(seeker, 'age')) + ' yosh)' if row_get(seeker, 'age') else ''}\n"
         f"🚻 {esc(row_get(seeker, 'gender'))}\n"
         f"📍 {esc(row_get(seeker, 'region'))}\n"
         f"💼 {esc(row_get(seeker, 'profession_title'))}\n"
@@ -317,12 +342,65 @@ def seeker_card(seeker: Any, *, hide_phone: bool = True) -> str:
         f"📈 Tajriba: {esc(row_get(seeker, 'experience'))}\n"
         f"🔢 Tajriba yili: {esc(row_get(seeker, 'experience_years', 0))}\n"
         f"🎓 Ma'lumot: {esc(row_get(seeker, 'education', 'Ko‘rsatilmagan'))}\n"
-        f"💰 Maosh: {esc(row_get(seeker, 'salary'))}\n"
+        f"📊 Excel: {esc(row_get(seeker, 'excel_level', '-'))}\n"
+        f"📝 Word: {esc(row_get(seeker, 'word_level', '-'))}\n"
+        f"💸 Oldingi oylik: {esc(row_get(seeker, 'previous_salary', '-'))}\n"
+        f"💰 Hozirgi oylik: {esc(row_get(seeker, 'current_salary', row_get(seeker, 'salary')))}\n"
         f"📞 Telefon: {esc(phone)}\n"
         f"📎 Rezyume: {esc(resume)}\n"
         f"🛂 Holat: {moderation_status_text(clean_text(row_get(seeker, 'moderation_status'), 'pending'))}\n"
         f"{'📝 Izoh: ' + esc(note) + chr(10) if note else ''}"
         f"ℹ️ Qo'shimcha: {esc(row_get(seeker, 'extra', 'Yo‘q'))}"
+    )
+
+
+def public_seeker_card(seeker: Any) -> str:
+    resume = "bor" if row_get(seeker, "resume_file_id") else "yo'q"
+    birth = row_get(seeker, "birth_date", "-")
+    age = row_get(seeker, "age", "")
+    birth_line = f"{esc(birth)}"
+    if age:
+        birth_line += f" ({esc(age)} yosh)"
+    return (
+        f"🆕 <b>Ish qidiruvchi</b>\n"
+        f"━━━━━━━━━━━━━━\n\n"
+        f"📄 <b>Nomzod #{row_get(seeker, 'id')}</b>\n"
+        f"👤 <b>{esc(row_get(seeker, 'full_name'))}</b>\n"
+        f"🎂 Tug'ilgan sana: {birth_line}\n"
+        f"🚻 Jins: {esc(row_get(seeker, 'gender'))}\n"
+        f"📍 Hudud: {esc(row_get(seeker, 'region'))}\n"
+        f"💼 Kasb: {esc(row_get(seeker, 'profession_title'))}\n"
+        f"🧭 Ish turi: {esc(row_get(seeker, 'job_type', '-'))}\n\n"
+        f"📈 Tajriba: {esc(row_get(seeker, 'experience'))}\n"
+        f"🎓 Ma'lumot: {esc(row_get(seeker, 'education', '-'))}\n"
+        f"📊 Excel: {esc(row_get(seeker, 'excel_level', '-'))}\n"
+        f"📝 Word: {esc(row_get(seeker, 'word_level', '-'))}\n\n"
+        f"💸 Oldingi oylik: {esc(row_get(seeker, 'previous_salary', '-'))}\n"
+        f"💰 Hozirgi oylik: {esc(row_get(seeker, 'current_salary', row_get(seeker, 'salary')))}\n"
+        f"📞 Aloqa: {esc(row_get(seeker, 'phone'))}\n"
+        f"📎 Rezyume: {esc(resume)}\n\n"
+        f"ℹ️ Qo'shimcha: {esc(row_get(seeker, 'extra', 'Yo‘q'))}"
+    )
+
+
+def seeker_match_card(seeker: Any) -> str:
+    birth = row_get(seeker, "birth_date", "-")
+    age = row_get(seeker, "age", "")
+    birth_line = f"{esc(birth)}"
+    if age:
+        birth_line += f" ({esc(age)} yosh)"
+    return (
+        f"📄 <b>Nomzod #{row_get(seeker, 'id')}</b>\n"
+        f"👤 <b>{esc(row_get(seeker, 'full_name'))}</b>\n"
+        f"🎂 Tug'ilgan sana: {birth_line}\n"
+        f"📍 Hudud: {esc(row_get(seeker, 'region'))}\n"
+        f"💼 Kasb: {esc(row_get(seeker, 'profession_title'))}\n"
+        f"🧭 Ish turi: {esc(row_get(seeker, 'job_type', '-'))}\n"
+        f"📈 Tajriba: {esc(row_get(seeker, 'experience'))}\n"
+        f"🎓 Ma'lumot: {esc(row_get(seeker, 'education', '-'))}\n"
+        f"📊 Excel: {esc(row_get(seeker, 'excel_level', '-'))}\n"
+        f"📝 Word: {esc(row_get(seeker, 'word_level', '-'))}\n"
+        f"📞 Telefon: yashirilgan"
     )
 
 
@@ -347,11 +425,30 @@ def vacancy_card(vacancy: Any) -> str:
     )
 
 
+def public_vacancy_card(vacancy: Any) -> str:
+    organization = clean_text(row_get(vacancy, "organization"), "Ko'rsatilmagan")
+    return (
+        f"🆕 <b>Vakansiya</b>\n"
+        f"━━━━━━━━━━━━━━\n\n"
+        f"📌 <b>Vakansiya #{row_get(vacancy, 'id')}</b>\n"
+        f"🏢 Tashkilot: <b>{esc(organization)}</b>\n"
+        f"👤 Mas'ul: {esc(row_get(vacancy, 'full_name'))}\n"
+        f"📍 Hudud: {esc(row_get(vacancy, 'region'))}\n"
+        f"💼 Mutaxassislik: {esc(row_get(vacancy, 'profession_title'))}\n"
+        f"👥 Kerakli xodim: {esc(row_get(vacancy, 'staff_count'))}\n"
+        f"🧭 Ish turi: {esc(row_get(vacancy, 'job_type'))}\n\n"
+        f"💰 Maosh: {esc(row_get(vacancy, 'salary'))}\n"
+        f"📈 Minimal tajriba: {esc(row_get(vacancy, 'min_experience_years', 0))} yil\n"
+        f"📞 Aloqa: {esc(row_get(vacancy, 'phone'))}\n\n"
+        f"📋 Talablar:\n{esc(row_get(vacancy, 'requirements'))}"
+    )
+
+
 def seeker_summary(data: dict[str, Any]) -> str:
     return (
         "📋 <b>Arizani tekshiring</b>\n\n"
         f"👤 Ism familiya: {esc(data.get('full_name'))}\n"
-        f"🎂 Yosh: {esc(data.get('age'))}\n"
+        f"🎂 Tug'ilgan sana: {esc(data.get('birth_date'))} ({esc(data.get('age'))} yosh)\n"
         f"🚻 Jins: {esc(data.get('gender'))}\n"
         f"📞 Telefon: {esc(data.get('phone'))}\n"
         f"📍 Hudud: {esc(data.get('region'))}\n"
@@ -360,8 +457,11 @@ def seeker_summary(data: dict[str, Any]) -> str:
         f"📈 Tajriba: {esc(data.get('experience'))}\n"
         f"🔢 Tajriba yili: {esc(data.get('experience_years'))}\n"
         f"🎓 Ma'lumot: {esc(data.get('education'))}\n"
+        f"📊 Excel: {esc(data.get('excel_level'))}\n"
+        f"📝 Word: {esc(data.get('word_level'))}\n"
         f"🏢 Oldingi ish joyi: {esc(data.get('previous_job'))}\n"
-        f"💰 Maosh: {esc(data.get('salary'))}\n"
+        f"💸 Oldingi ish joyidagi oylik: {esc(data.get('previous_salary'))}\n"
+        f"💰 Hozir olayotgan oylik: {esc(data.get('current_salary'))}\n"
         f"📎 Rezyume: {'bor' if data.get('resume_file_id') else 'yo‘q'}\n"
         f"ℹ️ Qo'shimcha: {esc(data.get('extra'))}"
     )
@@ -444,7 +544,7 @@ async def publish_seeker(bot: Bot, seeker: Any) -> None:
     if not channel_id:
         return
     try:
-        caption = "🆕 <b>Ish qidiruvchi</b>\n\n" + seeker_card(seeker, hide_phone=False)
+        caption = public_seeker_card(seeker)
         message_id = row_get(seeker, "channel_message_id", None)
         chat_id = row_get(seeker, "channel_chat_id", None) or channel_id
         if message_id:
@@ -477,7 +577,7 @@ async def publish_vacancy(bot: Bot, vacancy: Any) -> None:
     if not channel_id:
         return
     try:
-        text = "🆕 <b>Vakansiya</b>\n\n" + vacancy_card(vacancy)
+        text = public_vacancy_card(vacancy)
         message_id = row_get(vacancy, "channel_message_id", None)
         chat_id = row_get(vacancy, "channel_chat_id", None) or channel_id
         if message_id:
@@ -510,28 +610,92 @@ async def send_to_admins(bot: Bot, text: str, **kwargs) -> None:
 async def send_seeker_moderation_to_admins(bot: Bot, seeker: Any) -> None:
     for admin_id in all_admin_ids():
         try:
-            await bot.send_photo(
+            sent = await bot.send_photo(
                 admin_id,
                 photo=row_get(seeker, "photo_id"),
                 caption="🛂 <b>Yangi ariza moderatsiyada</b>\n\n" + seeker_card(seeker, hide_phone=False),
                 reply_markup=seeker_moderation_keyboard(int(row_get(seeker, "id"))),
             )
+            db.save_moderation_message(
+                "seeker",
+                int(row_get(seeker, "id")),
+                admin_id,
+                sent.chat.id,
+                sent.message_id,
+            )
             if row_get(seeker, "resume_file_id"):
-                await bot.send_document(
+                doc = await bot.send_document(
                     admin_id,
                     document=row_get(seeker, "resume_file_id"),
                     caption=f"📎 Nomzod #{row_get(seeker, 'id')} rezyumesi",
+                )
+                db.save_moderation_message(
+                    "seeker",
+                    int(row_get(seeker, "id")),
+                    admin_id,
+                    doc.chat.id,
+                    doc.message_id,
                 )
         except Exception as exc:
             logger.warning("Failed to send seeker moderation to %s: %s", admin_id, exc)
 
 
 async def send_vacancy_moderation_to_admins(bot: Bot, vacancy: Any) -> None:
-    await send_to_admins(
-        bot,
-        "🛂 <b>Yangi vakansiya moderatsiyada</b>\n\n" + vacancy_card(vacancy),
-        reply_markup=vacancy_moderation_keyboard(int(row_get(vacancy, "id"))),
-    )
+    for admin_id in all_admin_ids():
+        try:
+            sent = await bot.send_message(
+                admin_id,
+                "🛂 <b>Yangi vakansiya moderatsiyada</b>\n\n" + vacancy_card(vacancy),
+                reply_markup=vacancy_moderation_keyboard(int(row_get(vacancy, "id"))),
+            )
+            db.save_moderation_message(
+                "vacancy",
+                int(row_get(vacancy, "id")),
+                admin_id,
+                sent.chat.id,
+                sent.message_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to send vacancy moderation to %s: %s", admin_id, exc)
+
+
+async def safe_clear_reply_markup(message: Message | None) -> None:
+    if not message:
+        return
+    try:
+        await message.edit_reply_markup(reply_markup=None)
+    except Exception as exc:
+        logger.warning("Failed to clear reply markup: %s", exc)
+
+
+async def cleanup_moderation_requests(
+    bot: Bot,
+    item_type: str,
+    item_id: int,
+    handled_by: int,
+    current_message: Message | None = None,
+) -> None:
+    messages = db.list_moderation_messages(item_type, item_id)
+    for item in messages:
+        chat_id = int(row_get(item, "chat_id"))
+        message_id = int(row_get(item, "message_id"))
+        admin_tg_id = int(row_get(item, "admin_tg_id"))
+
+        if current_message and chat_id == current_message.chat.id and message_id == current_message.message_id:
+            await safe_clear_reply_markup(current_message)
+            continue
+
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as exc:
+            if admin_tg_id == handled_by:
+                try:
+                    await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+                except Exception:
+                    pass
+            logger.warning("Failed to delete moderation message %s/%s: %s", chat_id, message_id, exc)
+
+    db.delete_moderation_messages(item_type, item_id)
 
 
 async def send_matches_to_employer(bot: Bot, vacancy: Any) -> None:
@@ -557,7 +721,7 @@ async def send_matches_to_employer(bot: Bot, vacancy: Any) -> None:
     for seeker in matches:
         markup = employer_candidate_keyboard(int(row_get(vacancy, "id")), int(row_get(seeker, "id")))
         score = match_score(seeker, vacancy)
-        caption = f"🎯 <b>Moslik: {score}%</b>\n\n" + seeker_card(seeker, hide_phone=True)
+        caption = f"🎯 <b>Moslik: {score}%</b>\n\n" + seeker_match_card(seeker)
         try:
             await bot.send_photo(
                 employer_tg_id,
@@ -590,7 +754,7 @@ async def send_matched_vacancies_to_seeker(bot: Bot, seeker: Any, *, limit: int 
         score = match_score(seeker, vacancy)
         await bot.send_message(
             seeker_tg_id,
-            f"🎯 <b>Moslik: {score}%</b>\n\n" + vacancy_card(vacancy),
+            f"🎯 <b>Moslik: {score}%</b>\n\n" + public_vacancy_card(vacancy),
             reply_markup=matched_vacancy_keyboard(int(row_get(vacancy, "id"))),
         )
 
@@ -606,7 +770,7 @@ async def notify_seekers_about_new_vacancy(bot: Bot, vacancy: Any, *, limit: int
                 int(row_get(seeker, "telegram_id")),
                 "💼 <b>Sizga mos yangi vakansiya topildi</b>\n\n"
                 f"🎯 Moslik: {match_score(seeker, vacancy)}%\n\n"
-                + vacancy_card(vacancy),
+                + public_vacancy_card(vacancy),
                 reply_markup=matched_vacancy_keyboard(int(row_get(vacancy, "id"))),
             )
             await asyncio.sleep(0.03)
@@ -632,21 +796,21 @@ async def notify_candidate_about_interest(bot: Bot, interest_id: int, vacancy: A
 def filter_status_text(filters: dict[str, Any]) -> str:
     parts = []
     if filters.get("gender"):
-        parts.append(f"Jins: {filters['gender']}")
+        parts.append(f"🚻 Jins: {filters['gender']}")
     if filters.get("age_min") is not None or filters.get("age_max") is not None:
-        parts.append(f"Yosh: {filters.get('age_min', '')}-{filters.get('age_max', '')}")
+        parts.append(f"🎂 Yosh: {filters.get('age_min', '')}-{filters.get('age_max', '')}")
     if filters.get("region"):
-        parts.append(f"Hudud: {filters['region']}")
+        parts.append(f"📍 Hudud: {filters['region']}")
     if filters.get("profession_title"):
-        parts.append(f"Kasb: {filters['profession_title']}")
+        parts.append(f"💼 Kasb: {filters['profession_title']}")
     if filters.get("experience"):
-        parts.append(f"Tajriba: {filters['experience']}")
+        parts.append(f"📈 Tajriba: {filters['experience']}")
     if filters.get("job_type"):
-        parts.append(f"Ish turi: {filters['job_type']}")
+        parts.append(f"🧭 Ish turi: {filters['job_type']}")
     if filters.get("salary_min") is not None or filters.get("salary_max") is not None:
-        parts.append(f"Maosh: {filters.get('salary_min', '')}-{filters.get('salary_max', '')}")
+        parts.append(f"💰 Oylik: {filters.get('salary_min', '')}-{filters.get('salary_max', '')}")
     current = "\n".join(f"• {esc(part)}" for part in parts) if parts else "Filtr tanlanmagan."
-    return "Nomzodlar filtri:\n\n" + current
+    return "👥 <b>Nomzodlar filtri</b>\n\n" + current
 
 
 async def show_candidate_filter_menu(message: Message, state: FSMContext) -> None:
@@ -669,6 +833,7 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
             "ID",
             "Telegram ID",
             "Ism familiya",
+            "Tug'ilgan sana",
             "Yosh",
             "Jins",
             "Telefon",
@@ -678,9 +843,13 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
             "Tajriba",
             "Tajriba yili",
             "Ma'lumot",
+            "Excel",
+            "Word",
             "Oldingi ish joyi",
-            "Maosh",
-            "Maosh raqam",
+            "Oldingi oylik",
+            "Oldingi oylik raqam",
+            "Hozirgi oylik",
+            "Hozirgi oylik raqam",
             "Rezyume",
             "Moderatsiya",
             "Qo'shimcha",
@@ -693,6 +862,7 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
                 row_get(seeker, "id"),
                 row_get(seeker, "telegram_id"),
                 row_get(seeker, "full_name"),
+                row_get(seeker, "birth_date"),
                 row_get(seeker, "age"),
                 row_get(seeker, "gender"),
                 row_get(seeker, "phone"),
@@ -702,9 +872,13 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
                 row_get(seeker, "experience"),
                 row_get(seeker, "experience_years"),
                 row_get(seeker, "education"),
+                row_get(seeker, "excel_level"),
+                row_get(seeker, "word_level"),
                 row_get(seeker, "previous_job"),
-                row_get(seeker, "salary"),
-                row_get(seeker, "salary_amount"),
+                row_get(seeker, "previous_salary"),
+                row_get(seeker, "previous_salary_amount"),
+                row_get(seeker, "current_salary"),
+                row_get(seeker, "current_salary_amount"),
                 "bor" if row_get(seeker, "resume_file_id") else "yo'q",
                 row_get(seeker, "moderation_status"),
                 row_get(seeker, "extra"),
@@ -989,6 +1163,23 @@ async def admin_export_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.message(F.text == "💾 Backup", StateFilter("*"))
+async def admin_database_backup(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if not is_admin(message.from_user.id):
+        return
+    path = db.create_backup("admin", keep_last=20)
+    if path is None:
+        await message.answer("Hozircha backup olinadigan baza fayli yo'q.", reply_markup=admin_menu())
+        return
+    db.add_admin_log(message.from_user.id, "database_backup", "database", None, str(path))
+    await message.answer_document(
+        FSInputFile(path),
+        caption="💾 SQLite backup tayyor.\n\nBu faylni xavfsiz joyda saqlab qo'ying.",
+        reply_markup=admin_menu(),
+    )
+
+
 @router.message(F.text == "🧾 Admin log", StateFilter("*"))
 async def admin_logs(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -1098,20 +1289,34 @@ async def admin_pending_seekers(callback: CallbackQuery) -> None:
     await callback.message.answer(f"👨‍💼 Kutilayotgan arizalar: {len(seekers)}")
     for seeker in seekers:
         try:
-            await callback.message.answer_photo(
+            sent = await callback.message.answer_photo(
                 photo=row_get(seeker, "photo_id"),
                 caption=seeker_card(seeker, hide_phone=False),
                 reply_markup=seeker_moderation_keyboard(int(row_get(seeker, "id"))),
             )
         except Exception:
-            await callback.message.answer(
+            sent = await callback.message.answer(
                 seeker_card(seeker, hide_phone=False),
                 reply_markup=seeker_moderation_keyboard(int(row_get(seeker, "id"))),
             )
+        db.save_moderation_message(
+            "seeker",
+            int(row_get(seeker, "id")),
+            callback.from_user.id,
+            sent.chat.id,
+            sent.message_id,
+        )
         if row_get(seeker, "resume_file_id"):
-            await callback.message.answer_document(
+            doc = await callback.message.answer_document(
                 document=row_get(seeker, "resume_file_id"),
                 caption=f"📎 Nomzod #{row_get(seeker, 'id')} rezyumesi",
+            )
+            db.save_moderation_message(
+                "seeker",
+                int(row_get(seeker, "id")),
+                callback.from_user.id,
+                doc.chat.id,
+                doc.message_id,
             )
     await callback.answer()
 
@@ -1128,9 +1333,16 @@ async def admin_pending_vacancies(callback: CallbackQuery) -> None:
         return
     await callback.message.answer(f"🏢 Kutilayotgan vakansiyalar: {len(vacancies)}")
     for vacancy in vacancies:
-        await callback.message.answer(
+        sent = await callback.message.answer(
             vacancy_card(vacancy),
             reply_markup=vacancy_moderation_keyboard(int(row_get(vacancy, "id"))),
+        )
+        db.save_moderation_message(
+            "vacancy",
+            int(row_get(vacancy, "id")),
+            callback.from_user.id,
+            sent.chat.id,
+            sent.message_id,
         )
     await callback.answer()
 
@@ -1146,10 +1358,22 @@ async def admin_moderate_seeker(callback: CallbackQuery, state: FSMContext, bot:
     if not seeker:
         await callback.answer("Ariza topilmadi.", show_alert=True)
         return
+    if clean_text(row_get(seeker, "moderation_status"), "pending") != "pending":
+        await safe_clear_reply_markup(callback.message)
+        await callback.answer("Bu arizaga boshqa admin allaqachon ishlov bergan.", show_alert=True)
+        return
     if action == "approve":
-        db.set_seeker_moderation_status(seeker_id, "approved", moderated_by=callback.from_user.id)
+        if not db.set_seeker_moderation_status_if_pending(
+            seeker_id,
+            "approved",
+            moderated_by=callback.from_user.id,
+        ):
+            await safe_clear_reply_markup(callback.message)
+            await callback.answer("Bu arizaga boshqa admin allaqachon ishlov bergan.", show_alert=True)
+            return
         db.add_admin_log(callback.from_user.id, "approve_seeker", "seeker", seeker_id)
         seeker = db.get_seeker(seeker_id)
+        await cleanup_moderation_requests(bot, "seeker", seeker_id, callback.from_user.id, callback.message)
         await publish_seeker(bot, seeker)
         await bot.send_message(
             int(row_get(seeker, "telegram_id")),
@@ -1157,9 +1381,9 @@ async def admin_moderate_seeker(callback: CallbackQuery, state: FSMContext, bot:
             reply_markup=menu_for(int(row_get(seeker, "telegram_id"))),
         )
         await send_matched_vacancies_to_seeker(bot, seeker)
-        await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer("✅ Ariza tasdiqlandi va kanalga yuborildi.")
     else:
+        await cleanup_moderation_requests(bot, "seeker", seeker_id, callback.from_user.id, callback.message)
         await state.set_state(AdminModerationReason.seeker_reason)
         await state.update_data(seeker_id=seeker_id, moderation_message_id=callback.message.message_id)
         await callback.message.answer(
@@ -1181,10 +1405,22 @@ async def admin_moderate_vacancy(callback: CallbackQuery, state: FSMContext, bot
     if not vacancy:
         await callback.answer("Vakansiya topilmadi.", show_alert=True)
         return
+    if clean_text(row_get(vacancy, "moderation_status"), "pending") != "pending":
+        await safe_clear_reply_markup(callback.message)
+        await callback.answer("Bu vakansiyaga boshqa admin allaqachon ishlov bergan.", show_alert=True)
+        return
     if action == "approve":
-        db.set_vacancy_moderation_status(vacancy_id, "approved", moderated_by=callback.from_user.id)
+        if not db.set_vacancy_moderation_status_if_pending(
+            vacancy_id,
+            "approved",
+            moderated_by=callback.from_user.id,
+        ):
+            await safe_clear_reply_markup(callback.message)
+            await callback.answer("Bu vakansiyaga boshqa admin allaqachon ishlov bergan.", show_alert=True)
+            return
         db.add_admin_log(callback.from_user.id, "approve_vacancy", "vacancy", vacancy_id)
         vacancy = db.get_vacancy(vacancy_id)
+        await cleanup_moderation_requests(bot, "vacancy", vacancy_id, callback.from_user.id, callback.message)
         await publish_vacancy(bot, vacancy)
         await bot.send_message(
             int(row_get(vacancy, "employer_tg_id")),
@@ -1193,9 +1429,9 @@ async def admin_moderate_vacancy(callback: CallbackQuery, state: FSMContext, bot
         )
         await send_matches_to_employer(bot, vacancy)
         await notify_seekers_about_new_vacancy(bot, vacancy)
-        await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer("✅ Vakansiya tasdiqlandi va kanalga yuborildi.")
     else:
+        await cleanup_moderation_requests(bot, "vacancy", vacancy_id, callback.from_user.id, callback.message)
         await state.set_state(AdminModerationReason.vacancy_reason)
         await state.update_data(vacancy_id=vacancy_id, moderation_message_id=callback.message.message_id)
         await callback.message.answer(
@@ -1218,7 +1454,15 @@ async def admin_seeker_reject_reason(message: Message, state: FSMContext, bot: B
         await state.clear()
         await message.answer("Ariza topilmadi.", reply_markup=admin_menu())
         return
-    db.set_seeker_moderation_status(seeker_id, "needs_edit", reason, moderated_by=message.from_user.id)
+    if not db.set_seeker_moderation_status_if_pending(
+        seeker_id,
+        "needs_edit",
+        reason,
+        moderated_by=message.from_user.id,
+    ):
+        await state.clear()
+        await message.answer("Bu arizaga boshqa admin allaqachon ishlov bergan.", reply_markup=admin_menu())
+        return
     db.add_admin_log(message.from_user.id, "reject_seeker", "seeker", seeker_id, reason)
     await bot.send_message(
         int(row_get(seeker, "telegram_id")),
@@ -1243,7 +1487,15 @@ async def admin_vacancy_reject_reason(message: Message, state: FSMContext, bot: 
         await state.clear()
         await message.answer("Vakansiya topilmadi.", reply_markup=admin_menu())
         return
-    db.set_vacancy_moderation_status(vacancy_id, "needs_edit", reason, moderated_by=message.from_user.id)
+    if not db.set_vacancy_moderation_status_if_pending(
+        vacancy_id,
+        "needs_edit",
+        reason,
+        moderated_by=message.from_user.id,
+    ):
+        await state.clear()
+        await message.answer("Bu vakansiyaga boshqa admin allaqachon ishlov bergan.", reply_markup=admin_menu())
+        return
     db.add_admin_log(message.from_user.id, "reject_vacancy", "vacancy", vacancy_id, reason)
     await bot.send_message(
         int(row_get(vacancy, "employer_tg_id")),
@@ -1413,7 +1665,6 @@ async def admin_profession_delete(callback: CallbackQuery) -> None:
 @router.message(F.text == "📣 Ommaviy xabar", StateFilter("*"))
 async def admin_broadcast(message: Message, state: FSMContext) -> None:
     await state.clear()
-    db.add_admin_log(message.from_user.id, "broadcast", data.get("target", "all"), None, f"sent={sent}; failed={failed}")
     if not is_admin(message.from_user.id):
         return
     await message.answer("Kimlarga yuborilsin?", reply_markup=broadcast_target_keyboard())
@@ -1432,25 +1683,57 @@ async def admin_broadcast_target(callback: CallbackQuery, state: FSMContext) -> 
 
 
 @router.message(BroadcastForm.message)
-async def admin_broadcast_send(message: Message, state: FSMContext, bot: Bot) -> None:
+async def admin_broadcast_preview(message: Message, state: FSMContext, bot: Bot) -> None:
     if not is_admin(message.from_user.id):
         return
     data = await state.get_data()
+    await state.update_data(
+        target=data.get("target", "all"),
+        source_chat_id=message.chat.id,
+        source_message_id=message.message_id,
+    )
+    await message.answer("👁 <b>Xabar ko'rinishi</b>\n\nPastda yuboriladigan xabar nusxasi:")
+    await bot.copy_message(message.chat.id, message.chat.id, message.message_id)
+    await message.answer(
+        "Ushbu xabarni tanlangan foydalanuvchilarga yuboraymi?",
+        reply_markup=broadcast_preview_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith("broadcast_confirm:"))
+async def admin_broadcast_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    action = callback.data.split(":")[1]
+    data = await state.get_data()
+    if action == "no":
+        await state.clear()
+        await callback.message.answer("❌ Ommaviy xabar rad etildi. Hech kimga yuborilmadi.", reply_markup=admin_menu())
+        await callback.answer()
+        return
+    source_chat_id = data.get("source_chat_id")
+    source_message_id = data.get("source_message_id")
+    if not source_chat_id or not source_message_id:
+        await callback.answer("Xabar topilmadi. Qaytadan yuboring.", show_alert=True)
+        return
     users = db.broadcast_users(data.get("target", "all"))
     sent = 0
     failed = 0
     for user_id in users:
         try:
-            await bot.copy_message(user_id, message.chat.id, message.message_id)
+            await bot.copy_message(user_id, source_chat_id, source_message_id)
             sent += 1
             await asyncio.sleep(0.03)
         except Exception:
             failed += 1
     await state.clear()
-    await message.answer(
+    db.add_admin_log(callback.from_user.id, "broadcast", data.get("target", "all"), None, f"sent={sent}; failed={failed}")
+    await callback.message.answer(
         f"Ommaviy xabar yakunlandi.\n\nYuborildi: {sent}\nXatolik: {failed}",
         reply_markup=admin_menu(),
     )
+    await callback.answer()
 
 
 @router.message(F.text == "👥 Nomzodlar", StateFilter("*"))
@@ -1843,20 +2126,25 @@ async def my_seeker_edit_field(callback: CallbackQuery, state: FSMContext) -> No
         await callback.message.answer("Yangi ish turini tanlang.", reply_markup=seeker_edit_job_type_keyboard())
     elif field == "education":
         await callback.message.answer("Yangi ma'lumot darajasini tanlang.", reply_markup=education_keyboard("seeker_edit_education"))
+    elif field == "excel_level":
+        await callback.message.answer("Yangi Excel darajasini tanlang.", reply_markup=skill_level_keyboard("seeker_edit_excel"))
+    elif field == "word_level":
+        await callback.message.answer("Yangi Word darajasini tanlang.", reply_markup=skill_level_keyboard("seeker_edit_word"))
     else:
         await state.set_state(SeekerEditForm.value)
         await state.update_data(field=field)
         prompts = {
             "full_name": "Yangi ism familiyangizni kiriting.",
-            "age": "Yangi yoshingizni raqam bilan kiriting.",
+            "birth_date": "Yangi tug'ilgan sanangizni kiriting.\nFormat: <code>kun.oy.yil</code>\nMisol: <code>15.04.2001</code>",
             "gender": "Jinsingizni tanlang.",
             "phone": "Yangi telefon raqamingizni qo'lda kiriting.\nMisol: <code>+998 90 123 45 67</code>",
             "region": "Yangi hududni tanlang.",
             "experience": "Yangi tajribangizni kiriting.",
             "education": "Yangi ma'lumot darajangizni kiriting.",
             "previous_job": "Yangi oldingi ish joyingizni kiriting.",
-            "salary": "Yangi maosh kutuvingizni kiriting.",
-            "extra": "Yangi qo'shimcha ma'lumotni kiriting.",
+            "previous_salary": "Oldingi ish joyingizdagi oylikni kiriting.",
+            "current_salary": "Hozir olayotgan oyligingizni kiriting.",
+            "extra": "Qo'shimcha ma'lumotni qisqa yozing: ko'nikmalar, ish vaqti, talablar yoki izohlar.",
         }
         markup = cancel_menu()
         if field == "gender":
@@ -1903,6 +2191,40 @@ async def my_seeker_edit_education(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("seeker_edit_excel:"))
+async def my_seeker_edit_excel(callback: CallbackQuery, bot: Bot) -> None:
+    seeker = db.get_seeker_by_tg(callback.from_user.id)
+    if not seeker:
+        await callback.answer("Avval ariza topshiring.", show_alert=True)
+        return
+    level = callback.data.split(":", 1)[1]
+    db.update_seeker_field(callback.from_user.id, "excel_level", level)
+    seeker = db.get_seeker_by_tg(callback.from_user.id)
+    await callback.message.answer(
+        "✅ Excel darajasi yangilandi.\n\nArizangiz qayta admin tekshiruviga yuborildi.",
+        reply_markup=menu_for(callback.from_user.id),
+    )
+    await send_seeker_moderation_to_admins(bot, seeker)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("seeker_edit_word:"))
+async def my_seeker_edit_word(callback: CallbackQuery, bot: Bot) -> None:
+    seeker = db.get_seeker_by_tg(callback.from_user.id)
+    if not seeker:
+        await callback.answer("Avval ariza topshiring.", show_alert=True)
+        return
+    level = callback.data.split(":", 1)[1]
+    db.update_seeker_field(callback.from_user.id, "word_level", level)
+    seeker = db.get_seeker_by_tg(callback.from_user.id)
+    await callback.message.answer(
+        "✅ Word darajasi yangilandi.\n\nArizangiz qayta admin tekshiruviga yuborildi.",
+        reply_markup=menu_for(callback.from_user.id),
+    )
+    await send_seeker_moderation_to_admins(bot, seeker)
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("seeker_edit_prof:"))
 async def my_seeker_edit_profession(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if not db.get_seeker_by_tg(callback.from_user.id):
@@ -1939,17 +2261,33 @@ async def my_seeker_edit_value(message: Message, state: FSMContext, bot: Bot) ->
             await message.answer("Telefon raqamni to'g'ri kiriting.\nMisol: <code>+998 90 123 45 67</code>")
             return
         value = phone
-    if field == "age":
-        parsed = parse_positive_int(value, minimum=14, maximum=90)
-        if parsed is None:
-            await message.answer("Yoshni 14 dan 90 gacha raqam bilan kiriting.")
+    if field == "birth_date":
+        parsed_birth = parse_birth_date(value)
+        if parsed_birth is None:
+            await message.answer("Sanani to'g'ri kiriting.\nFormat: <code>kun.oy.yil</code>\nMisol: <code>15.04.2001</code>")
             return
-        value = parsed
+        birth_date, age = parsed_birth
+        db.update_seeker_field(message.from_user.id, "age", age)
+        value = birth_date
     if field == "gender" and value not in {"Erkak", "Ayol"}:
         await message.answer("Jinsni tugmadan tanlang.", reply_markup=gender_menu())
         return
-    if field == "salary":
-        db.update_seeker_field(message.from_user.id, "salary_amount", parse_money_amount(value))
+    if field == "previous_salary":
+        amount = parse_money_amount(value)
+        if amount is None:
+            await message.answer("Oylikni raqam bilan kiriting.\nMisol: <code>5 000 000</code>")
+            return
+        db.update_seeker_field(message.from_user.id, "previous_salary_amount", amount)
+    if field == "current_salary":
+        amount = parse_money_amount(value)
+        if amount is None and value != "0":
+            await message.answer("Oylikni raqam bilan kiriting.\nMisol: <code>6 000 000</code> yoki <code>0</code>")
+            return
+        if value == "0":
+            amount = 0
+        db.update_seeker_field(message.from_user.id, "current_salary_amount", amount)
+        db.update_seeker_field(message.from_user.id, "salary", value)
+        db.update_seeker_field(message.from_user.id, "salary_amount", amount)
     if field == "experience":
         db.update_seeker_field(message.from_user.id, "experience_years", parse_experience_years(value))
     db.update_seeker_field(message.from_user.id, field, value)
@@ -2038,7 +2376,11 @@ async def seeker_start(message: Message, state: FSMContext) -> None:
     await state.set_state(SeekerForm.photo)
     await message.answer(
         "👨‍💼 <b>Ishga ariza topshirish</b>\n\n"
-        "Avval profilingiz uchun sifatli foto yuboring.",
+        "Avval profilingiz uchun rasm yuboring.\n\n"
+        "📸 Rasm talabi:\n"
+        "• o'zingizning oxirgi 15 kunda tushgan rasmingiz bo'lsin\n"
+        "• yuzingiz aniq ko'rinsin\n"
+        "• begona odamlar, reklama yoki xira rasm bo'lmasin",
         reply_markup=cancel_menu(),
     )
 
@@ -2056,17 +2398,18 @@ async def seeker_photo(message: Message, state: FSMContext) -> None:
 @router.message(SeekerForm.full_name)
 async def seeker_full_name(message: Message, state: FSMContext) -> None:
     await state.update_data(full_name=clean_text(message.text))
-    await state.set_state(SeekerForm.age)
-    await message.answer("Yoshingizni kiriting.\nMisol: 18")
+    await state.set_state(SeekerForm.birth_date)
+    await message.answer("Tug'ilgan sanangizni kiriting.\nFormat: <code>kun.oy.yil</code>\nMisol: <code>15.04.2001</code>")
 
 
-@router.message(SeekerForm.age)
-async def seeker_age(message: Message, state: FSMContext) -> None:
-    age = parse_positive_int(clean_text(message.text), minimum=14, maximum=90)
-    if age is None:
-        await message.answer("Yoshni 14 dan 90 gacha raqam bilan kiriting.")
+@router.message(SeekerForm.birth_date)
+async def seeker_birth_date(message: Message, state: FSMContext) -> None:
+    parsed = parse_birth_date(message.text)
+    if parsed is None:
+        await message.answer("Sanani to'g'ri kiriting.\nFormat: <code>kun.oy.yil</code>\nMisol: <code>15.04.2001</code>")
         return
-    await state.update_data(age=age)
+    birth_date, age = parsed
+    await state.update_data(birth_date=birth_date, age=age)
     await state.set_state(SeekerForm.gender)
     await message.answer("Jinsingizni tanlang.", reply_markup=gender_menu())
 
@@ -2136,6 +2479,24 @@ async def seeker_experience(message: Message, state: FSMContext) -> None:
 async def seeker_education(callback: CallbackQuery, state: FSMContext) -> None:
     education = callback.data.split(":", 1)[1]
     await state.update_data(education=education)
+    await state.set_state(SeekerForm.excel_level)
+    await callback.message.answer("📊 Excel bilish darajangizni tanlang.", reply_markup=skill_level_keyboard("seeker_excel"))
+    await callback.answer()
+
+
+@router.callback_query(SeekerForm.excel_level, F.data.startswith("seeker_excel:"))
+async def seeker_excel_level(callback: CallbackQuery, state: FSMContext) -> None:
+    level = callback.data.split(":", 1)[1]
+    await state.update_data(excel_level=level)
+    await state.set_state(SeekerForm.word_level)
+    await callback.message.answer("📝 Word bilish darajangizni tanlang.", reply_markup=skill_level_keyboard("seeker_word"))
+    await callback.answer()
+
+
+@router.callback_query(SeekerForm.word_level, F.data.startswith("seeker_word:"))
+async def seeker_word_level(callback: CallbackQuery, state: FSMContext) -> None:
+    level = callback.data.split(":", 1)[1]
+    await state.update_data(word_level=level)
     await state.set_state(SeekerForm.previous_job)
     await callback.message.answer("Oldingi ish joyingizni kiriting.\nAgar bo'lmasa: Yo'q", reply_markup=cancel_menu())
     await callback.answer()
@@ -2144,20 +2505,43 @@ async def seeker_education(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(SeekerForm.previous_job)
 async def seeker_previous_job(message: Message, state: FSMContext) -> None:
     await state.update_data(previous_job=clean_text(message.text))
-    await state.set_state(SeekerForm.salary)
-    await message.answer("Kutilayotgan maoshni kiriting.\nMisol: 6 000 000")
+    await state.set_state(SeekerForm.previous_salary)
+    await message.answer("Oldingi ish joyingizdagi oylikni kiriting.\nMisol: <code>5 000 000</code>")
 
 
-@router.message(SeekerForm.salary)
-async def seeker_salary(message: Message, state: FSMContext) -> None:
-    salary = clean_text(message.text)
-    amount = parse_money_amount(salary)
+@router.message(SeekerForm.previous_salary)
+async def seeker_previous_salary(message: Message, state: FSMContext) -> None:
+    previous_salary = clean_text(message.text)
+    amount = parse_money_amount(previous_salary)
     if amount is None:
         await message.answer("Maoshni raqam bilan kiriting.\nMisol: <code>6 000 000</code>")
         return
-    await state.update_data(salary=salary, salary_amount=amount)
+    await state.update_data(previous_salary=previous_salary, previous_salary_amount=amount)
+    await state.set_state(SeekerForm.current_salary)
+    await message.answer("Hozir olayotgan oyligingizni kiriting.\nAgar hozir ishlamayotgan bo'lsangiz: <code>0</code>")
+
+
+@router.message(SeekerForm.current_salary)
+async def seeker_current_salary(message: Message, state: FSMContext) -> None:
+    current_salary = clean_text(message.text)
+    amount = parse_money_amount(current_salary)
+    if amount is None and current_salary != "0":
+        await message.answer("Oylikni raqam bilan kiriting.\nMisol: <code>6 000 000</code> yoki <code>0</code>")
+        return
+    if current_salary == "0":
+        amount = 0
+    await state.update_data(
+        current_salary=current_salary,
+        current_salary_amount=amount,
+        salary=current_salary,
+        salary_amount=amount,
+    )
     await state.set_state(SeekerForm.extra)
-    await message.answer("Qo'shimcha ma'lumot kiriting.\nAgar bo'lmasa: Yo'q")
+    await message.answer(
+        "Qo'shimcha ma'lumot kiriting.\n\n"
+        "Qisqa yozing: qaysi ishni xohlaysiz, qaysi ko'nikmalaringiz bor, ish vaqti yoki boshqa muhim talablaringiz.\n"
+        "Agar qo'shimcha ma'lumot bo'lmasa: <code>Yo'q</code>"
+    )
 
 
 @router.message(SeekerForm.extra)
@@ -2233,7 +2617,11 @@ async def vacancy_start(message: Message, state: FSMContext) -> None:
 async def vacancy_full_name(message: Message, state: FSMContext) -> None:
     await state.update_data(full_name=clean_text(message.text))
     await state.set_state(VacancyForm.organization)
-    await message.answer("Tashkilot nomi\nMisol: Techno Market")
+    await message.answer(
+        "Tashkilot nomini kiriting.\nMisol: <code>Techno Market</code>\n\n"
+        "Agar tashkilot nomini ko'rsatishni xohlamasangiz, pastdagi tugmani bosing.",
+        reply_markup=skip_inline_keyboard("vacancy_org_skip"),
+    )
 
 
 @router.message(VacancyForm.organization)
@@ -2244,6 +2632,17 @@ async def vacancy_organization(message: Message, state: FSMContext) -> None:
         "Telefon raqamni qo'lda kiriting.\nMisol: <code>+998 90 123 45 67</code>",
         reply_markup=contact_menu(),
     )
+
+
+@router.callback_query(VacancyForm.organization, F.data == "vacancy_org_skip")
+async def vacancy_organization_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(organization="Ko'rsatilmagan")
+    await state.set_state(VacancyForm.phone)
+    await callback.message.answer(
+        "Telefon raqamni qo'lda kiriting.\nMisol: <code>+998 90 123 45 67</code>",
+        reply_markup=contact_menu(),
+    )
+    await callback.answer()
 
 
 @router.message(VacancyForm.phone)
@@ -2431,7 +2830,7 @@ async def seeker_vacancy_interest(callback: CallbackQuery, bot: Bot) -> None:
         int(row_get(vacancy, "employer_tg_id")),
         "📩 <b>Nomzod vakansiyangizga qiziqish bildirdi</b>\n\n"
         + f"🎯 Moslik: {match_score(seeker, vacancy)}%\n\n"
-        + seeker_card(seeker, hide_phone=True),
+        + seeker_match_card(seeker),
         reply_markup=employer_candidate_request_keyboard(interest_id),
     )
     await callback.message.answer("✅ Ish beruvchiga aloqa so'rovi yuborildi.")

@@ -90,7 +90,7 @@ def admin_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🧰 Kasblar"), KeyboardButton(text="📣 Ommaviy xabar")],
             [KeyboardButton(text="👥 Nomzodlar"), KeyboardButton(text="🏢 Vakansiyalar")],
             [KeyboardButton(text="🔎 Qidiruv"), KeyboardButton(text="📤 Excel eksport")],
-            [KeyboardButton(text="🧾 Admin log")],
+            [KeyboardButton(text="💾 Backup"), KeyboardButton(text="🧾 Admin log")],
             [KeyboardButton(text="🏠 Asosiy menyu")],
         ],
         resize_keyboard=True,
@@ -138,6 +138,12 @@ def vacancy_confirm_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="❌ Bekor qilish", callback_data="vacancy_cancel"),
             ]
         ]
+    )
+
+
+def skip_inline_keyboard(callback_data: str = "skip") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⏭ Bo'sh qoldirish", callback_data=callback_data)]]
     )
 
 
@@ -195,6 +201,18 @@ def education_keyboard(prefix: str = "education") -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Magistr", callback_data=f"{prefix}:Magistr"),
             ],
             [InlineKeyboardButton(text="Farqi yo'q", callback_data=f"{prefix}:Farqi yo'q")],
+        ]
+    )
+
+
+def skill_level_keyboard(prefix: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="❌ Bilmayman", callback_data=f"{prefix}:Bilmayman"),
+                InlineKeyboardButton(text="🟡 O'rtacha", callback_data=f"{prefix}:O'rtacha"),
+            ],
+            [InlineKeyboardButton(text="🟢 Yaxshi", callback_data=f"{prefix}:Yaxshi")],
         ]
     )
 
@@ -267,7 +285,7 @@ def seeker_profile_keyboard() -> InlineKeyboardMarkup:
 def seeker_edit_fields_keyboard() -> InlineKeyboardMarkup:
     fields = [
         ("👤 Ism", "full_name"),
-        ("🎂 Yosh", "age"),
+        ("🎂 Tug'ilgan sana", "birth_date"),
         ("🚻 Jins", "gender"),
         ("📞 Telefon", "phone"),
         ("📍 Hudud", "region"),
@@ -275,8 +293,11 @@ def seeker_edit_fields_keyboard() -> InlineKeyboardMarkup:
         ("🧭 Ish turi", "job_type"),
         ("📈 Tajriba", "experience"),
         ("🎓 Ma'lumot", "education"),
+        ("📊 Excel", "excel_level"),
+        ("📝 Word", "word_level"),
         ("🏢 Oldingi ish", "previous_job"),
-        ("💰 Maosh", "salary"),
+        ("💸 Oldingi oylik", "previous_salary"),
+        ("💰 Hozirgi oylik", "current_salary"),
         ("ℹ️ Qo'shimcha", "extra"),
     ]
     builder = InlineKeyboardBuilder()
@@ -369,6 +390,17 @@ def broadcast_target_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📢 Barcha foydalanuvchilarga", callback_data="broadcast:all")],
             [InlineKeyboardButton(text="🏢 Faqat ish beruvchilarga", callback_data="broadcast:employers")],
             [InlineKeyboardButton(text="👨‍💼 Faqat ish qidiruvchilarga", callback_data="broadcast:seekers")],
+        ]
+    )
+
+
+def broadcast_preview_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Tasdiqlash", callback_data="broadcast_confirm:yes"),
+                InlineKeyboardButton(text="❌ Rad etish", callback_data="broadcast_confirm:no"),
+            ]
         ]
     )
 

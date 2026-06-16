@@ -1,9 +1,20 @@
-import sqlite3
+"""MongoDB ga asoslangan ma'lumotlar bazasi qatlami.
+
+Eski SQLite versiyasi `database_sqlite_backup.py` faylida saqlangan.
+Barcha metod imzolari avvalgidek qoldirilgan, shuning uchun `main.py` o'zgartirilmaydi.
+Yozuvlar oddiy `dict` ko'rinishida qaytariladi (avvalgi `sqlite3.Row` o'rniga) —
+`row_get()` va `row["..."]` ikkalasi ham ishlaydi.
+"""
+
+import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from config import BACKUP_DIR, DATABASE_PATH
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
+
+from config import BACKUP_DIR, MONGO_DB_NAME, MONGO_URI
 
 
 DEFAULT_PROFESSIONS = ("Dasturchi", "Operator", "Sotuvchi", "Dizayner")
@@ -17,180 +28,188 @@ def days_from_now_iso(days: int) -> str:
     return (datetime.now() + timedelta(days=days)).isoformat(timespec="seconds")
 
 
-class Database:
-    def __init__(self, path: Path = DATABASE_PATH) -> None:
-        self.path = path
-        self.backup_dir = BACKUP_DIR
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
+def _regex(value: str) -> dict[str, Any]:
+    """SQLitedagi `LIKE %x%` ga mos keluvchi, registrga sezgir bo'lmagan regex."""
+    return {"$regex": re.escape(value), "$options": "i"}
 
+
+# Har bir kolleksiya uchun maydonlar va ularning standart qiymatlari.
+# Bu SQLite ustunlaridagi NULL larni taqlid qiladi: qaytarilgan dict da
+# har doim barcha maydonlar mavjud bo'ladi, shunda `row["field"]` xato bermaydi.
+_DEFAULTS: dict[str, dict[str, Any]] = {
+    "users": {
+        "tg_id": None, "username": None, "full_name": None, "role": None,
+        "created_at": None, "updated_at": None,
+    },
+    "admins": {"tg_id": None, "added_by": None, "created_at": None},
+    "channels": {"title": None, "chat_id": None, "invite_link": None, "created_at": None},
+    "professions": {"title": None, "is_active": 1, "created_at": None},
+    "seekers": {
+        "telegram_id": None, "photo_id": None, "full_name": None, "age": None,
+        "gender": None, "phone": None, "region": None, "district": None,
+        "birth_date": None, "profession_id": None, "profession_title": None,
+        "job_type": None, "experience": None, "experience_years": None,
+        "education": None, "excel_level": None, "word_level": None,
+        "previous_job": None, "previous_salary": None, "previous_salary_amount": None,
+        "current_salary": None, "current_salary_amount": None, "salary": None,
+        "salary_amount": None, "extra": None, "resume_file_id": None,
+        "resume_file_name": None, "moderation_status": "pending", "moderation_note": None,
+        "moderated_by": None, "approved_at": None, "published_at": None,
+        "channel_chat_id": None, "channel_message_id": None,
+        "created_at": None, "updated_at": None,
+    },
+    "employers": {
+        "telegram_id": None, "full_name": None, "organization": None, "phone": None,
+        "region": None, "district": None, "created_at": None, "updated_at": None,
+    },
+    "vacancies": {
+        "employer_tg_id": None, "full_name": None, "organization": None, "phone": None,
+        "region": None, "district": None, "profession_id": None, "profession_title": None,
+        "staff_count": None, "job_type": None, "salary": None, "salary_amount": None,
+        "min_experience_years": None, "requirements": None, "active": 1,
+        "moderation_status": "pending", "moderation_note": None, "moderated_by": None,
+        "approved_at": None, "published_at": None, "channel_chat_id": None,
+        "channel_message_id": None, "expires_at": None,
+        "created_at": None, "updated_at": None,
+    },
+    "interests": {
+        "vacancy_id": None, "seeker_id": None, "employer_tg_id": None,
+        "seeker_tg_id": None, "status": "pending", "created_at": None, "updated_at": None,
+    },
+    "candidate_actions": {
+        "employer_tg_id": None, "vacancy_id": None, "seeker_id": None,
+        "status": None, "created_at": None, "updated_at": None,
+    },
+    "admin_logs": {
+        "admin_tg_id": None, "action": None, "target_type": None,
+        "target_id": None, "details": None, "created_at": None,
+    },
+    "moderation_messages": {
+        "item_type": None, "item_id": None, "admin_tg_id": None,
+        "chat_id": None, "message_id": None, "created_at": None,
+    },
+}
+
+_BACKUP_COLLECTIONS = (
+    "settings", "users", "admins", "channels", "professions", "seekers",
+    "employers", "vacancies", "interests", "candidate_actions",
+    "admin_logs", "moderation_messages", "counters",
+)
+
+
+class Database:
+    def __init__(self, uri: str = MONGO_URI, db_name: str = MONGO_DB_NAME) -> None:
+        self.backup_dir = BACKUP_DIR
+        self.client: MongoClient = MongoClient(uri, serverSelectionTimeoutMS=10000)
+        self.db = self.client[db_name]
+
+    # ------------------------------------------------------------------
+    # Yordamchi metodlar
+    # ------------------------------------------------------------------
+    def _clean(self, doc: dict[str, Any] | None, collection: str | None = None) -> dict[str, Any] | None:
+        """`_id` ni olib tashlaydi va yetishmayotgan maydonlarni standart qiymat bilan to'ldiradi."""
+        if doc is None:
+            return None
+        doc = dict(doc)
+        doc.pop("_id", None)
+        if collection and collection in _DEFAULTS:
+            for key, default in _DEFAULTS[collection].items():
+                doc.setdefault(key, default)
+        return doc
+
+    def _clean_list(self, cursor, collection: str | None = None) -> list[dict[str, Any]]:
+        return [self._clean(doc, collection) for doc in cursor]
+
+    def _next_id(self, name: str) -> int:
+        doc = self.db.counters.find_one_and_update(
+            {"_id": name},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        return int(doc["seq"])
+
+    def _sync_counter(self, name: str) -> None:
+        """Mavjud eng katta `id` ga qarab counterni to'g'rilaydi (import qilingandan keyin)."""
+        top = self.db[name].find_one(sort=[("id", DESCENDING)])
+        max_id = int(top["id"]) if top and top.get("id") is not None else 0
+        current = self.db.counters.find_one({"_id": name})
+        if not current or int(current.get("seq", 0)) < max_id:
+            self.db.counters.update_one({"_id": name}, {"$set": {"seq": max_id}}, upsert=True)
+
+    # ------------------------------------------------------------------
+    # Init / indekslar / seed
+    # ------------------------------------------------------------------
     def init(self) -> None:
         self.create_backup("startup", keep_last=20)
-        self.conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
 
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tg_id INTEGER NOT NULL UNIQUE,
-                username TEXT,
-                full_name TEXT,
-                role TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS admins (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tg_id INTEGER NOT NULL UNIQUE,
-                added_by INTEGER,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS channels (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                chat_id TEXT NOT NULL UNIQUE,
-                invite_link TEXT,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS professions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL UNIQUE,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS seekers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER NOT NULL UNIQUE,
-                photo_id TEXT NOT NULL,
-                full_name TEXT NOT NULL,
-                age INTEGER NOT NULL,
-                gender TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                region TEXT NOT NULL,
-                district TEXT,
-                profession_id INTEGER,
-                profession_title TEXT NOT NULL,
-                experience TEXT NOT NULL,
-                education TEXT,
-                previous_job TEXT NOT NULL,
-                salary TEXT NOT NULL,
-                extra TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (profession_id) REFERENCES professions(id) ON DELETE SET NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS employers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id INTEGER NOT NULL UNIQUE,
-                full_name TEXT NOT NULL,
-                organization TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                region TEXT NOT NULL,
-                district TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS vacancies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                employer_tg_id INTEGER NOT NULL,
-                full_name TEXT NOT NULL,
-                organization TEXT NOT NULL,
-                phone TEXT NOT NULL,
-                region TEXT NOT NULL,
-                district TEXT,
-                profession_id INTEGER,
-                profession_title TEXT NOT NULL,
-                staff_count INTEGER NOT NULL,
-                job_type TEXT NOT NULL,
-                salary TEXT NOT NULL,
-                requirements TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (profession_id) REFERENCES professions(id) ON DELETE SET NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS interests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vacancy_id INTEGER NOT NULL,
-                seeker_id INTEGER NOT NULL,
-                employer_tg_id INTEGER NOT NULL,
-                seeker_tg_id INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(vacancy_id, seeker_id),
-                FOREIGN KEY (vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE,
-                FOREIGN KEY (seeker_id) REFERENCES seekers(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS candidate_actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                employer_tg_id INTEGER NOT NULL,
-                vacancy_id INTEGER NOT NULL,
-                seeker_id INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(employer_tg_id, vacancy_id, seeker_id),
-                FOREIGN KEY (vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE,
-                FOREIGN KEY (seeker_id) REFERENCES seekers(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS admin_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                admin_tg_id INTEGER NOT NULL,
-                action TEXT NOT NULL,
-                target_type TEXT,
-                target_id INTEGER,
-                details TEXT,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS moderation_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_type TEXT NOT NULL,
-                item_id INTEGER NOT NULL,
-                admin_tg_id INTEGER NOT NULL,
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(item_type, item_id, admin_tg_id, message_id)
-            );
-            """
+        self.db.users.create_index([("tg_id", ASCENDING)], unique=True)
+        self.db.admins.create_index([("tg_id", ASCENDING)], unique=True)
+        self.db.channels.create_index([("chat_id", ASCENDING)], unique=True)
+        self.db.professions.create_index([("title", ASCENDING)], unique=True)
+        self.db.seekers.create_index([("telegram_id", ASCENDING)], unique=True)
+        self.db.employers.create_index([("telegram_id", ASCENDING)], unique=True)
+        self.db.interests.create_index([("vacancy_id", ASCENDING), ("seeker_id", ASCENDING)], unique=True)
+        self.db.candidate_actions.create_index(
+            [("employer_tg_id", ASCENDING), ("vacancy_id", ASCENDING), ("seeker_id", ASCENDING)],
+            unique=True,
         )
-        self.set_setting_default("force_subscription", "0")
-        self._migrate_schema()
-        self._seed_professions()
-        self.conn.commit()
+        self.db.moderation_messages.create_index(
+            [("item_type", ASCENDING), ("item_id", ASCENDING),
+             ("admin_tg_id", ASCENDING), ("message_id", ASCENDING)],
+            unique=True,
+        )
+        self.db.settings.create_index([("key", ASCENDING)], unique=True)
 
+        self.set_setting_default("force_subscription", "0")
+        self._seed_professions()
+
+        # Eski SQLite migratsiyasi MongoDB uchun kerak emas — faqat bayroqni qo'yamiz.
+        if self.get_setting("migration_moderation_v1", "0") != "1":
+            self.set_setting("migration_moderation_v1", "1")
+
+        # Muddati o'tgan vakansiyalarni yopish.
+        self.db.vacancies.update_many(
+            {
+                "active": 1,
+                "moderation_status": "approved",
+                "expires_at": {"$ne": None, "$lt": now_iso()},
+            },
+            {"$set": {"moderation_status": "expired", "active": 0, "updated_at": now_iso()}},
+        )
+
+    def _seed_professions(self) -> None:
+        if self.db.professions.count_documents({}) > 0:
+            return
+        for title in DEFAULT_PROFESSIONS:
+            self.db.professions.insert_one(
+                {"id": self._next_id("professions"), "title": title, "is_active": 1, "created_at": now_iso()}
+            )
+
+    # ------------------------------------------------------------------
+    # Backup (barcha kolleksiyalarni JSON ga dump qiladi)
+    # ------------------------------------------------------------------
     def create_backup(self, reason: str = "manual", keep_last: int = 20) -> Path | None:
-        if not self.path.exists() or self.path.stat().st_size == 0:
+        try:
+            dump: dict[str, list[dict[str, Any]]] = {}
+            total = 0
+            for name in _BACKUP_COLLECTIONS:
+                docs = []
+                for doc in self.db[name].find():
+                    doc.pop("_id", None)
+                    docs.append(doc)
+                dump[name] = docs
+                total += len(docs)
+            if total == 0:
+                return None
+        except Exception:
             return None
 
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         safe_reason = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in reason).strip("_")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = self.backup_dir / f"{self.path.stem}_{safe_reason}_{stamp}.sqlite3"
-
-        backup_conn = sqlite3.connect(backup_path)
-        try:
-            self.conn.backup(backup_conn)
-        finally:
-            backup_conn.close()
-
+        backup_path = self.backup_dir / f"mongo_{safe_reason}_{stamp}.json"
+        backup_path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
         self._cleanup_backups(keep_last)
         return backup_path
 
@@ -198,7 +217,7 @@ class Database:
         if keep_last <= 0 or not self.backup_dir.exists():
             return
         backups = sorted(
-            self.backup_dir.glob(f"{self.path.stem}_*.sqlite3"),
+            self.backup_dir.glob("mongo_*.json"),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
         )
@@ -208,124 +227,52 @@ class Database:
             except OSError:
                 pass
 
-    def _columns(self, table: str) -> set[str]:
-        return {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-    def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
-        if column not in self._columns(table):
-            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-    def _migrate_schema(self) -> None:
-        self._add_column_if_missing("seekers", "resume_file_id", "TEXT")
-        self._add_column_if_missing("seekers", "resume_file_name", "TEXT")
-        self._add_column_if_missing("seekers", "birth_date", "TEXT")
-        self._add_column_if_missing("seekers", "district", "TEXT")
-        self._add_column_if_missing("seekers", "job_type", "TEXT")
-        self._add_column_if_missing("seekers", "experience_years", "INTEGER")
-        self._add_column_if_missing("seekers", "excel_level", "TEXT")
-        self._add_column_if_missing("seekers", "word_level", "TEXT")
-        self._add_column_if_missing("seekers", "previous_salary", "TEXT")
-        self._add_column_if_missing("seekers", "previous_salary_amount", "INTEGER")
-        self._add_column_if_missing("seekers", "current_salary", "TEXT")
-        self._add_column_if_missing("seekers", "current_salary_amount", "INTEGER")
-        self._add_column_if_missing("seekers", "salary_amount", "INTEGER")
-        self._add_column_if_missing("seekers", "moderation_status", "TEXT NOT NULL DEFAULT 'pending'")
-        self._add_column_if_missing("seekers", "moderation_note", "TEXT")
-        self._add_column_if_missing("seekers", "moderated_by", "INTEGER")
-        self._add_column_if_missing("seekers", "approved_at", "TEXT")
-        self._add_column_if_missing("seekers", "published_at", "TEXT")
-        self._add_column_if_missing("seekers", "channel_chat_id", "TEXT")
-        self._add_column_if_missing("seekers", "channel_message_id", "INTEGER")
-
-        self._add_column_if_missing("vacancies", "salary_amount", "INTEGER")
-        self._add_column_if_missing("vacancies", "district", "TEXT")
-        self._add_column_if_missing("vacancies", "min_experience_years", "INTEGER")
-        self._add_column_if_missing("vacancies", "moderation_status", "TEXT NOT NULL DEFAULT 'pending'")
-        self._add_column_if_missing("vacancies", "moderation_note", "TEXT")
-        self._add_column_if_missing("vacancies", "moderated_by", "INTEGER")
-        self._add_column_if_missing("vacancies", "approved_at", "TEXT")
-        self._add_column_if_missing("vacancies", "published_at", "TEXT")
-        self._add_column_if_missing("vacancies", "channel_chat_id", "TEXT")
-        self._add_column_if_missing("vacancies", "channel_message_id", "INTEGER")
-        self._add_column_if_missing("vacancies", "expires_at", "TEXT")
-
-        self._add_column_if_missing("employers", "district", "TEXT")
-
-        if self.get_setting("migration_moderation_v1", "0") != "1":
-            self.conn.execute("UPDATE seekers SET moderation_status = 'approved', approved_at = COALESCE(approved_at, updated_at)")
-            self.conn.execute("UPDATE vacancies SET moderation_status = 'approved', approved_at = COALESCE(approved_at, updated_at)")
-            self.set_setting("migration_moderation_v1", "1")
-
-        self.conn.execute(
-            """
-            UPDATE vacancies
-            SET moderation_status = 'expired', active = 0
-            WHERE active = 1
-                AND moderation_status = 'approved'
-                AND expires_at IS NOT NULL
-                AND expires_at < ?
-            """,
-            (now_iso(),),
-        )
-
-    def _seed_professions(self) -> None:
-        count = self.conn.execute("SELECT COUNT(*) FROM professions").fetchone()[0]
-        if count:
-            return
-        for title in DEFAULT_PROFESSIONS:
-            self.conn.execute(
-                "INSERT INTO professions(title, created_at) VALUES (?, ?)",
-                (title, now_iso()),
-            )
-
+    # ------------------------------------------------------------------
+    # Sozlamalar (settings)
+    # ------------------------------------------------------------------
     def set_setting_default(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
-            (key, value),
+        self.db.settings.update_one(
+            {"key": key},
+            {"$setOnInsert": {"key": key, "value": value}},
+            upsert=True,
         )
 
     def get_setting(self, key: str, default: str = "") -> str:
-        row = self.conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        row = self.db.settings.find_one({"key": key})
         return row["value"] if row else default
 
     def set_setting(self, key: str, value: str) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO settings(key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (key, value),
+        self.db.settings.update_one(
+            {"key": key},
+            {"$set": {"key": key, "value": value}},
+            upsert=True,
         )
-        self.conn.commit()
 
     def force_subscription_enabled(self) -> bool:
         return self.get_setting("force_subscription", "0") == "1"
 
+    # ------------------------------------------------------------------
+    # Adminlar
+    # ------------------------------------------------------------------
     def is_admin(self, tg_id: int) -> bool:
-        try:
-            row = self.conn.execute("SELECT 1 FROM admins WHERE tg_id = ?", (tg_id,)).fetchone()
-        except sqlite3.OperationalError:
-            return False
-        return row is not None
+        return self.db.admins.find_one({"tg_id": tg_id}) is not None
 
-    def list_admins(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM admins ORDER BY id").fetchall()
+    def list_admins(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.admins.find().sort("id", ASCENDING), "admins")
 
     def add_admin(self, tg_id: int, added_by: int | None = None) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO admins(tg_id, added_by, created_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(tg_id) DO NOTHING
-            """,
-            (tg_id, added_by, now_iso()),
+        if self.db.admins.find_one({"tg_id": tg_id}):
+            return
+        self.db.admins.insert_one(
+            {"id": self._next_id("admins"), "tg_id": tg_id, "added_by": added_by, "created_at": now_iso()}
         )
-        self.conn.commit()
 
     def delete_admin(self, tg_id: int) -> None:
-        self.conn.execute("DELETE FROM admins WHERE tg_id = ?", (tg_id,))
-        self.conn.commit()
+        self.db.admins.delete_one({"tg_id": tg_id})
 
+    # ------------------------------------------------------------------
+    # Admin loglar
+    # ------------------------------------------------------------------
     def add_admin_log(
         self,
         admin_tg_id: int,
@@ -334,21 +281,24 @@ class Database:
         target_id: int | None = None,
         details: str | None = None,
     ) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO admin_logs(admin_tg_id, action, target_type, target_id, details, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (admin_tg_id, action, target_type, target_id, details, now_iso()),
+        self.db.admin_logs.insert_one(
+            {
+                "id": self._next_id("admin_logs"),
+                "admin_tg_id": admin_tg_id,
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+                "details": details,
+                "created_at": now_iso(),
+            }
         )
-        self.conn.commit()
 
-    def list_admin_logs(self, limit: int = 30) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM admin_logs ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+    def list_admin_logs(self, limit: int = 30) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.admin_logs.find().sort("id", DESCENDING).limit(limit), "admin_logs")
 
+    # ------------------------------------------------------------------
+    # Moderatsiya xabarlari
+    # ------------------------------------------------------------------
     def save_moderation_message(
         self,
         item_type: str,
@@ -357,274 +307,210 @@ class Database:
         chat_id: int,
         message_id: int,
     ) -> None:
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO moderation_messages(
-                item_type, item_id, admin_tg_id, chat_id, message_id, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (item_type, item_id, admin_tg_id, chat_id, message_id, now_iso()),
+        if self.db.moderation_messages.find_one(
+            {"item_type": item_type, "item_id": item_id, "admin_tg_id": admin_tg_id, "message_id": message_id}
+        ):
+            return
+        self.db.moderation_messages.insert_one(
+            {
+                "id": self._next_id("moderation_messages"),
+                "item_type": item_type,
+                "item_id": item_id,
+                "admin_tg_id": admin_tg_id,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "created_at": now_iso(),
+            }
         )
-        self.conn.commit()
 
-    def list_moderation_messages(self, item_type: str, item_id: int) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            """
-            SELECT * FROM moderation_messages
-            WHERE item_type = ? AND item_id = ?
-            ORDER BY id
-            """,
-            (item_type, item_id),
-        ).fetchall()
+    def list_moderation_messages(self, item_type: str, item_id: int) -> list[dict[str, Any]]:
+        cursor = self.db.moderation_messages.find({"item_type": item_type, "item_id": item_id}).sort("id", ASCENDING)
+        return self._clean_list(cursor, "moderation_messages")
 
     def delete_moderation_messages(self, item_type: str, item_id: int) -> None:
-        self.conn.execute(
-            "DELETE FROM moderation_messages WHERE item_type = ? AND item_id = ?",
-            (item_type, item_id),
-        )
-        self.conn.commit()
+        self.db.moderation_messages.delete_many({"item_type": item_type, "item_id": item_id})
 
+    # ------------------------------------------------------------------
+    # Foydalanuvchilar
+    # ------------------------------------------------------------------
     def upsert_user(self, tg_id: int, username: str | None, full_name: str, role: str | None = None) -> None:
-        current = self.conn.execute("SELECT role FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
-        saved_role = role if role is not None else (current["role"] if current else None)
+        current = self.db.users.find_one({"tg_id": tg_id})
+        saved_role = role if role is not None else (current.get("role") if current else None)
         stamp = now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO users(tg_id, username, full_name, role, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(tg_id) DO UPDATE SET
-                username = excluded.username,
-                full_name = excluded.full_name,
-                role = excluded.role,
-                updated_at = excluded.updated_at
-            """,
-            (tg_id, username, full_name, saved_role, stamp, stamp),
-        )
-        self.conn.commit()
+        if current:
+            self.db.users.update_one(
+                {"tg_id": tg_id},
+                {"$set": {"username": username, "full_name": full_name, "role": saved_role, "updated_at": stamp}},
+            )
+        else:
+            self.db.users.insert_one(
+                {
+                    "id": self._next_id("users"),
+                    "tg_id": tg_id,
+                    "username": username,
+                    "full_name": full_name,
+                    "role": saved_role,
+                    "created_at": stamp,
+                    "updated_at": stamp,
+                }
+            )
 
     def set_user_role(self, tg_id: int, role: str) -> None:
-        self.conn.execute(
-            "UPDATE users SET role = ?, updated_at = ? WHERE tg_id = ?",
-            (role, now_iso(), tg_id),
-        )
-        self.conn.commit()
+        self.db.users.update_one({"tg_id": tg_id}, {"$set": {"role": role, "updated_at": now_iso()}})
 
-    def list_channels(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM channels ORDER BY id").fetchall()
+    # ------------------------------------------------------------------
+    # Kanallar (majburiy obuna)
+    # ------------------------------------------------------------------
+    def list_channels(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.channels.find().sort("id", ASCENDING), "channels")
 
     def add_channel(self, title: str, chat_id: str, invite_link: str | None = None) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO channels(title, chat_id, invite_link, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                title = excluded.title,
-                invite_link = excluded.invite_link
-            """,
-            (title, chat_id, invite_link, now_iso()),
-        )
-        self.conn.commit()
+        existing = self.db.channels.find_one({"chat_id": chat_id})
+        if existing:
+            self.db.channels.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"title": title, "invite_link": invite_link}},
+            )
+        else:
+            self.db.channels.insert_one(
+                {
+                    "id": self._next_id("channels"),
+                    "title": title,
+                    "chat_id": chat_id,
+                    "invite_link": invite_link,
+                    "created_at": now_iso(),
+                }
+            )
 
     def delete_channel(self, channel_id: int) -> None:
-        self.conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
-        self.conn.commit()
+        self.db.channels.delete_one({"id": channel_id})
 
-    def list_professions(self, only_active: bool = True) -> list[sqlite3.Row]:
-        query = "SELECT * FROM professions"
-        if only_active:
-            query += " WHERE is_active = 1"
-        query += " ORDER BY title COLLATE NOCASE"
-        return self.conn.execute(query).fetchall()
+    # ------------------------------------------------------------------
+    # Kasblar
+    # ------------------------------------------------------------------
+    def list_professions(self, only_active: bool = True) -> list[dict[str, Any]]:
+        query = {"is_active": 1} if only_active else {}
+        rows = self._clean_list(self.db.professions.find(query), "professions")
+        rows.sort(key=lambda d: (d.get("title") or "").lower())
+        return rows
 
-    def get_profession(self, profession_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM professions WHERE id = ?", (profession_id,)).fetchone()
+    def get_profession(self, profession_id: int) -> dict[str, Any] | None:
+        return self._clean(self.db.professions.find_one({"id": profession_id}), "professions")
 
     def add_profession(self, title: str) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO professions(title, is_active, created_at)
-            VALUES (?, 1, ?)
-            ON CONFLICT(title) DO UPDATE SET is_active = 1
-            """,
-            (title, now_iso()),
-        )
-        self.conn.commit()
+        existing = self.db.professions.find_one({"title": title})
+        if existing:
+            self.db.professions.update_one({"title": title}, {"$set": {"is_active": 1}})
+        else:
+            self.db.professions.insert_one(
+                {"id": self._next_id("professions"), "title": title, "is_active": 1, "created_at": now_iso()}
+            )
 
     def update_profession(self, profession_id: int, title: str) -> None:
         old = self.get_profession(profession_id)
-        self.conn.execute("UPDATE professions SET title = ? WHERE id = ?", (title, profession_id))
+        self.db.professions.update_one({"id": profession_id}, {"$set": {"title": title}})
         if old:
-            self.conn.execute(
-                "UPDATE seekers SET profession_title = ? WHERE profession_id = ?",
-                (title, profession_id),
-            )
-            self.conn.execute(
-                "UPDATE vacancies SET profession_title = ? WHERE profession_id = ?",
-                (title, profession_id),
-            )
-        self.conn.commit()
+            self.db.seekers.update_many({"profession_id": profession_id}, {"$set": {"profession_title": title}})
+            self.db.vacancies.update_many({"profession_id": profession_id}, {"$set": {"profession_title": title}})
 
     def delete_profession(self, profession_id: int) -> None:
-        self.conn.execute("UPDATE professions SET is_active = 0 WHERE id = ?", (profession_id,))
-        self.conn.commit()
+        self.db.professions.update_one({"id": profession_id}, {"$set": {"is_active": 0}})
 
+    # ------------------------------------------------------------------
+    # Nomzodlar (seekers)
+    # ------------------------------------------------------------------
     def save_seeker(self, telegram_id: int, data: dict[str, Any]) -> int:
         stamp = now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO seekers(
-                telegram_id, photo_id, full_name, age, gender, phone, region, district,
-                birth_date, profession_id, profession_title, job_type, experience, experience_years,
-                education, excel_level, word_level, previous_job,
-                previous_salary, previous_salary_amount, current_salary, current_salary_amount,
-                salary, salary_amount, extra, resume_file_id, resume_file_name,
-                moderation_status, moderation_note, moderated_by, approved_at, published_at,
-                created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
-            ON CONFLICT(telegram_id) DO UPDATE SET
-                photo_id = excluded.photo_id,
-                full_name = excluded.full_name,
-                age = excluded.age,
-                gender = excluded.gender,
-                phone = excluded.phone,
-                region = excluded.region,
-                district = excluded.district,
-                birth_date = excluded.birth_date,
-                profession_id = excluded.profession_id,
-                profession_title = excluded.profession_title,
-                job_type = excluded.job_type,
-                experience = excluded.experience,
-                experience_years = excluded.experience_years,
-                education = excluded.education,
-                excel_level = excluded.excel_level,
-                word_level = excluded.word_level,
-                previous_job = excluded.previous_job,
-                previous_salary = excluded.previous_salary,
-                previous_salary_amount = excluded.previous_salary_amount,
-                current_salary = excluded.current_salary,
-                current_salary_amount = excluded.current_salary_amount,
-                salary = excluded.salary,
-                extra = excluded.extra,
-                resume_file_id = excluded.resume_file_id,
-                resume_file_name = excluded.resume_file_name,
-                salary_amount = excluded.salary_amount,
-                moderation_status = 'pending',
-                moderation_note = NULL,
-                moderated_by = NULL,
-                approved_at = NULL,
-                published_at = NULL,
-                updated_at = excluded.updated_at
-            """,
-            (
-                telegram_id,
-                data["photo_id"],
-                data["full_name"],
-                int(data["age"]),
-                data["gender"],
-                data["phone"],
-                data["region"],
-                data.get("district"),
-                data.get("birth_date"),
-                data.get("profession_id"),
-                data["profession_title"],
-                data.get("job_type"),
-                data["experience"],
-                data.get("experience_years"),
-                data.get("education"),
-                data.get("excel_level"),
-                data.get("word_level"),
-                data["previous_job"],
-                data.get("previous_salary"),
-                data.get("previous_salary_amount"),
-                data.get("current_salary"),
-                data.get("current_salary_amount"),
-                data.get("salary") or data.get("current_salary"),
-                data.get("salary_amount") or data.get("current_salary_amount"),
-                data.get("extra"),
-                data.get("resume_file_id"),
-                data.get("resume_file_name"),
-                stamp,
-                stamp,
-            ),
-        )
+        fields = {
+            "photo_id": data["photo_id"],
+            "full_name": data["full_name"],
+            "age": int(data["age"]),
+            "gender": data["gender"],
+            "phone": data["phone"],
+            "region": data["region"],
+            "district": data.get("district"),
+            "birth_date": data.get("birth_date"),
+            "profession_id": data.get("profession_id"),
+            "profession_title": data["profession_title"],
+            "job_type": data.get("job_type"),
+            "experience": data["experience"],
+            "experience_years": data.get("experience_years"),
+            "education": data.get("education"),
+            "excel_level": data.get("excel_level"),
+            "word_level": data.get("word_level"),
+            "previous_job": data["previous_job"],
+            "previous_salary": data.get("previous_salary"),
+            "previous_salary_amount": data.get("previous_salary_amount"),
+            "current_salary": data.get("current_salary"),
+            "current_salary_amount": data.get("current_salary_amount"),
+            "salary": data.get("salary") or data.get("current_salary"),
+            "salary_amount": data.get("salary_amount") or data.get("current_salary_amount"),
+            "extra": data.get("extra"),
+            "resume_file_id": data.get("resume_file_id"),
+            "resume_file_name": data.get("resume_file_name"),
+            "moderation_status": "pending",
+            "moderation_note": None,
+            "moderated_by": None,
+            "approved_at": None,
+            "published_at": None,
+            "updated_at": stamp,
+        }
+        existing = self.db.seekers.find_one({"telegram_id": telegram_id})
+        if existing:
+            self.db.seekers.update_one({"telegram_id": telegram_id}, {"$set": fields})
+            seeker_id = int(existing["id"])
+        else:
+            seeker_id = self._next_id("seekers")
+            doc = {"id": seeker_id, "telegram_id": telegram_id, "created_at": stamp, **fields}
+            self.db.seekers.insert_one(doc)
         self.set_user_role(telegram_id, "seeker")
-        self.conn.commit()
-        row = self.conn.execute("SELECT id FROM seekers WHERE telegram_id = ?", (telegram_id,)).fetchone()
-        return int(row["id"])
+        return seeker_id
 
-    def get_seeker(self, seeker_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM seekers WHERE id = ?", (seeker_id,)).fetchone()
+    def get_seeker(self, seeker_id: int) -> dict[str, Any] | None:
+        return self._clean(self.db.seekers.find_one({"id": seeker_id}), "seekers")
 
-    def get_seeker_by_tg(self, telegram_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM seekers WHERE telegram_id = ?", (telegram_id,)).fetchone()
+    def get_seeker_by_tg(self, telegram_id: int) -> dict[str, Any] | None:
+        return self._clean(self.db.seekers.find_one({"telegram_id": telegram_id}), "seekers")
+
+    _SEEKER_EDITABLE = {
+        "photo_id", "full_name", "age", "birth_date", "gender", "phone", "region",
+        "district", "profession_id", "profession_title", "job_type", "experience",
+        "experience_years", "education", "excel_level", "word_level", "previous_job",
+        "previous_salary", "previous_salary_amount", "current_salary",
+        "current_salary_amount", "salary", "salary_amount", "extra",
+        "resume_file_id", "resume_file_name",
+    }
 
     def update_seeker_field(self, telegram_id: int, field: str, value: Any) -> None:
-        allowed = {
-            "photo_id",
-            "full_name",
-            "age",
-            "birth_date",
-            "gender",
-            "phone",
-            "region",
-            "district",
-            "profession_id",
-            "profession_title",
-            "job_type",
-            "experience",
-            "experience_years",
-            "education",
-            "excel_level",
-            "word_level",
-            "previous_job",
-            "previous_salary",
-            "previous_salary_amount",
-            "current_salary",
-            "current_salary_amount",
-            "salary",
-            "salary_amount",
-            "extra",
-            "resume_file_id",
-            "resume_file_name",
-        }
-        if field not in allowed:
+        if field not in self._SEEKER_EDITABLE:
             raise ValueError(f"Unsupported seeker field: {field}")
-        self.conn.execute(
-            f"""
-            UPDATE seekers
-            SET {field} = ?,
-                moderation_status = 'pending',
-                moderation_note = NULL,
-                moderated_by = NULL,
-                approved_at = NULL,
-                published_at = NULL,
-                updated_at = ?
-            WHERE telegram_id = ?
-            """,
-            (value, now_iso(), telegram_id),
+        self.db.seekers.update_one(
+            {"telegram_id": telegram_id},
+            {"$set": {
+                field: value,
+                "moderation_status": "pending",
+                "moderation_note": None,
+                "moderated_by": None,
+                "approved_at": None,
+                "published_at": None,
+                "updated_at": now_iso(),
+            }},
         )
-        self.conn.commit()
 
     def update_seeker_profession(self, telegram_id: int, profession_id: int, profession_title: str) -> None:
-        stamp = now_iso()
-        self.conn.execute(
-            """
-            UPDATE seekers
-            SET profession_id = ?,
-                profession_title = ?,
-                moderation_status = 'pending',
-                moderation_note = NULL,
-                moderated_by = NULL,
-                approved_at = NULL,
-                published_at = NULL,
-                updated_at = ?
-            WHERE telegram_id = ?
-            """,
-            (profession_id, profession_title, stamp, telegram_id),
+        self.db.seekers.update_one(
+            {"telegram_id": telegram_id},
+            {"$set": {
+                "profession_id": profession_id,
+                "profession_title": profession_title,
+                "moderation_status": "pending",
+                "moderation_note": None,
+                "moderated_by": None,
+                "approved_at": None,
+                "published_at": None,
+                "updated_at": now_iso(),
+            }},
         )
-        self.conn.commit()
 
     def set_seeker_moderation_status(
         self,
@@ -634,20 +520,16 @@ class Database:
         moderated_by: int | None = None,
     ) -> None:
         stamp = now_iso()
-        approved_at = stamp if status == "approved" else None
-        self.conn.execute(
-            """
-            UPDATE seekers
-            SET moderation_status = ?,
-                moderation_note = ?,
-                moderated_by = ?,
-                approved_at = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (status, note, moderated_by, approved_at, stamp, seeker_id),
+        self.db.seekers.update_one(
+            {"id": seeker_id},
+            {"$set": {
+                "moderation_status": status,
+                "moderation_note": note,
+                "moderated_by": moderated_by,
+                "approved_at": stamp if status == "approved" else None,
+                "updated_at": stamp,
+            }},
         )
-        self.conn.commit()
 
     def set_seeker_moderation_status_if_pending(
         self,
@@ -657,21 +539,17 @@ class Database:
         moderated_by: int | None = None,
     ) -> bool:
         stamp = now_iso()
-        approved_at = stamp if status == "approved" else None
-        cur = self.conn.execute(
-            """
-            UPDATE seekers
-            SET moderation_status = ?,
-                moderation_note = ?,
-                moderated_by = ?,
-                approved_at = ?,
-                updated_at = ?
-            WHERE id = ? AND moderation_status = 'pending'
-            """,
-            (status, note, moderated_by, approved_at, stamp, seeker_id),
+        result = self.db.seekers.update_one(
+            {"id": seeker_id, "moderation_status": "pending"},
+            {"$set": {
+                "moderation_status": status,
+                "moderation_note": note,
+                "moderated_by": moderated_by,
+                "approved_at": stamp if status == "approved" else None,
+                "updated_at": stamp,
+            }},
         )
-        self.conn.commit()
-        return cur.rowcount > 0
+        return result.modified_count > 0
 
     def mark_seeker_published(
         self,
@@ -679,155 +557,108 @@ class Database:
         channel_chat_id: str | None = None,
         channel_message_id: int | None = None,
     ) -> None:
-        self.conn.execute(
-            """
-            UPDATE seekers
-            SET published_at = ?,
-                channel_chat_id = COALESCE(?, channel_chat_id),
-                channel_message_id = COALESCE(?, channel_message_id),
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (now_iso(), channel_chat_id, channel_message_id, now_iso(), seeker_id),
-        )
-        self.conn.commit()
+        update: dict[str, Any] = {"published_at": now_iso(), "updated_at": now_iso()}
+        if channel_chat_id is not None:
+            update["channel_chat_id"] = channel_chat_id
+        if channel_message_id is not None:
+            update["channel_message_id"] = channel_message_id
+        self.db.seekers.update_one({"id": seeker_id}, {"$set": update})
 
-    def list_pending_seekers(self, limit: int = 20) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM seekers WHERE moderation_status = 'pending' ORDER BY updated_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+    def list_pending_seekers(self, limit: int = 20) -> list[dict[str, Any]]:
+        cursor = self.db.seekers.find({"moderation_status": "pending"}).sort("updated_at", DESCENDING).limit(limit)
+        return self._clean_list(cursor, "seekers")
 
+    # ------------------------------------------------------------------
+    # Ish beruvchilar (employers)
+    # ------------------------------------------------------------------
     def save_employer(self, telegram_id: int, data: dict[str, Any]) -> int:
         stamp = now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO employers(telegram_id, full_name, organization, phone, region, district, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(telegram_id) DO UPDATE SET
-                full_name = excluded.full_name,
-                organization = excluded.organization,
-                phone = excluded.phone,
-                region = excluded.region,
-                district = excluded.district,
-                updated_at = excluded.updated_at
-            """,
-            (
-                telegram_id,
-                data["full_name"],
-                data["organization"],
-                data["phone"],
-                data["region"],
-                data.get("district"),
-                stamp,
-                stamp,
-            ),
-        )
+        fields = {
+            "full_name": data["full_name"],
+            "organization": data["organization"],
+            "phone": data["phone"],
+            "region": data["region"],
+            "district": data.get("district"),
+            "updated_at": stamp,
+        }
+        existing = self.db.employers.find_one({"telegram_id": telegram_id})
+        if existing:
+            self.db.employers.update_one({"telegram_id": telegram_id}, {"$set": fields})
+            employer_id = int(existing["id"])
+        else:
+            employer_id = self._next_id("employers")
+            self.db.employers.insert_one(
+                {"id": employer_id, "telegram_id": telegram_id, "created_at": stamp, **fields}
+            )
         self.set_user_role(telegram_id, "employer")
-        self.conn.commit()
-        row = self.conn.execute("SELECT id FROM employers WHERE telegram_id = ?", (telegram_id,)).fetchone()
-        return int(row["id"])
+        return employer_id
 
+    # ------------------------------------------------------------------
+    # Vakansiyalar
+    # ------------------------------------------------------------------
     def save_vacancy(self, employer_tg_id: int, data: dict[str, Any]) -> int:
         stamp = now_iso()
-        cur = self.conn.execute(
-            """
-            INSERT INTO vacancies(
-                employer_tg_id, full_name, organization, phone, region, district, profession_id,
-                profession_title, staff_count, job_type, salary, salary_amount,
-                min_experience_years, requirements, expires_at,
-                moderation_status, moderation_note, moderated_by, approved_at, published_at,
-                created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
-            """,
-            (
-                employer_tg_id,
-                data["full_name"],
-                data["organization"],
-                data["phone"],
-                data["region"],
-                data.get("district"),
-                data.get("profession_id"),
-                data["profession_title"],
-                int(data["staff_count"]),
-                data["job_type"],
-                data["salary"],
-                data.get("salary_amount"),
-                data.get("min_experience_years"),
-                data["requirements"],
-                data.get("expires_at") or days_from_now_iso(30),
-                stamp,
-                stamp,
-            ),
+        vacancy_id = self._next_id("vacancies")
+        self.db.vacancies.insert_one(
+            {
+                "id": vacancy_id,
+                "employer_tg_id": employer_tg_id,
+                "full_name": data["full_name"],
+                "organization": data["organization"],
+                "phone": data["phone"],
+                "region": data["region"],
+                "district": data.get("district"),
+                "profession_id": data.get("profession_id"),
+                "profession_title": data["profession_title"],
+                "staff_count": int(data["staff_count"]),
+                "job_type": data["job_type"],
+                "salary": data["salary"],
+                "salary_amount": data.get("salary_amount"),
+                "min_experience_years": data.get("min_experience_years"),
+                "requirements": data["requirements"],
+                "active": 1,
+                "expires_at": data.get("expires_at") or days_from_now_iso(30),
+                "moderation_status": "pending",
+                "moderation_note": None,
+                "moderated_by": None,
+                "approved_at": None,
+                "published_at": None,
+                "created_at": stamp,
+                "updated_at": stamp,
+            }
         )
-        self.conn.commit()
-        return int(cur.lastrowid)
+        return vacancy_id
 
-    def get_vacancy(self, vacancy_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM vacancies WHERE id = ?", (vacancy_id,)).fetchone()
+    def get_vacancy(self, vacancy_id: int) -> dict[str, Any] | None:
+        return self._clean(self.db.vacancies.find_one({"id": vacancy_id}), "vacancies")
 
-    def list_vacancies(self, limit: int = 20) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM vacancies ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+    def list_vacancies(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.vacancies.find().sort("id", DESCENDING).limit(limit), "vacancies")
 
-    def list_vacancies_by_employer(self, employer_tg_id: int, limit: int = 20) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM vacancies WHERE employer_tg_id = ? ORDER BY id DESC LIMIT ?",
-            (employer_tg_id, limit),
-        ).fetchall()
+    def list_vacancies_by_employer(self, employer_tg_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        cursor = self.db.vacancies.find({"employer_tg_id": employer_tg_id}).sort("id", DESCENDING).limit(limit)
+        return self._clean_list(cursor, "vacancies")
 
     def count_vacancies_since(self, employer_tg_id: int, since_iso: str) -> int:
-        return int(
-            self.conn.execute(
-                "SELECT COUNT(*) FROM vacancies WHERE employer_tg_id = ? AND created_at >= ?",
-                (employer_tg_id, since_iso),
-            ).fetchone()[0]
-        )
+        return self.db.vacancies.count_documents({"employer_tg_id": employer_tg_id, "created_at": {"$gte": since_iso}})
 
     def count_seeker_updates_since(self, telegram_id: int, since_iso: str) -> int:
-        return int(
-            self.conn.execute(
-                "SELECT COUNT(*) FROM seekers WHERE telegram_id = ? AND updated_at >= ?",
-                (telegram_id, since_iso),
-            ).fetchone()[0]
-        )
+        return self.db.seekers.count_documents({"telegram_id": telegram_id, "updated_at": {"$gte": since_iso}})
 
     def delete_vacancy(self, vacancy_id: int) -> None:
-        self.conn.execute("DELETE FROM vacancies WHERE id = ?", (vacancy_id,))
-        self.conn.commit()
+        self.db.vacancies.delete_one({"id": vacancy_id})
+
+    _VACANCY_EDITABLE = {
+        "organization", "phone", "region", "district", "profession_id", "profession_title",
+        "staff_count", "job_type", "salary", "salary_amount", "min_experience_years",
+        "requirements", "active", "moderation_status", "moderation_note", "moderated_by",
+        "approved_at", "published_at", "expires_at",
+    }
 
     def update_vacancy_field(self, vacancy_id: int, field: str, value: Any) -> None:
-        allowed = {
-            "organization",
-            "phone",
-            "region",
-            "district",
-            "profession_id",
-            "profession_title",
-            "staff_count",
-            "job_type",
-            "salary",
-            "salary_amount",
-            "min_experience_years",
-            "requirements",
-            "active",
-            "moderation_status",
-            "moderation_note",
-            "moderated_by",
-            "approved_at",
-            "published_at",
-            "expires_at",
-        }
-        if field not in allowed:
+        if field not in self._VACANCY_EDITABLE:
             raise ValueError(f"Unsupported vacancy field: {field}")
-        self.conn.execute(
-            f"UPDATE vacancies SET {field} = ?, updated_at = ? WHERE id = ?",
-            (value, now_iso(), vacancy_id),
-        )
-        self.conn.commit()
+        self.db.vacancies.update_one({"id": vacancy_id}, {"$set": {field: value, "updated_at": now_iso()}})
 
     def set_vacancy_moderation_status(
         self,
@@ -837,20 +668,16 @@ class Database:
         moderated_by: int | None = None,
     ) -> None:
         stamp = now_iso()
-        approved_at = stamp if status == "approved" else None
-        self.conn.execute(
-            """
-            UPDATE vacancies
-            SET moderation_status = ?,
-                moderation_note = ?,
-                moderated_by = ?,
-                approved_at = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (status, note, moderated_by, approved_at, stamp, vacancy_id),
+        self.db.vacancies.update_one(
+            {"id": vacancy_id},
+            {"$set": {
+                "moderation_status": status,
+                "moderation_note": note,
+                "moderated_by": moderated_by,
+                "approved_at": stamp if status == "approved" else None,
+                "updated_at": stamp,
+            }},
         )
-        self.conn.commit()
 
     def set_vacancy_moderation_status_if_pending(
         self,
@@ -860,21 +687,17 @@ class Database:
         moderated_by: int | None = None,
     ) -> bool:
         stamp = now_iso()
-        approved_at = stamp if status == "approved" else None
-        cur = self.conn.execute(
-            """
-            UPDATE vacancies
-            SET moderation_status = ?,
-                moderation_note = ?,
-                moderated_by = ?,
-                approved_at = ?,
-                updated_at = ?
-            WHERE id = ? AND moderation_status = 'pending'
-            """,
-            (status, note, moderated_by, approved_at, stamp, vacancy_id),
+        result = self.db.vacancies.update_one(
+            {"id": vacancy_id, "moderation_status": "pending"},
+            {"$set": {
+                "moderation_status": status,
+                "moderation_note": note,
+                "moderated_by": moderated_by,
+                "approved_at": stamp if status == "approved" else None,
+                "updated_at": stamp,
+            }},
         )
-        self.conn.commit()
-        return cur.rowcount > 0
+        return result.modified_count > 0
 
     def mark_vacancy_published(
         self,
@@ -882,86 +705,72 @@ class Database:
         channel_chat_id: str | None = None,
         channel_message_id: int | None = None,
     ) -> None:
-        self.conn.execute(
-            """
-            UPDATE vacancies
-            SET published_at = ?,
-                channel_chat_id = COALESCE(?, channel_chat_id),
-                channel_message_id = COALESCE(?, channel_message_id),
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (now_iso(), channel_chat_id, channel_message_id, now_iso(), vacancy_id),
-        )
-        self.conn.commit()
+        update: dict[str, Any] = {"published_at": now_iso(), "updated_at": now_iso()}
+        if channel_chat_id is not None:
+            update["channel_chat_id"] = channel_chat_id
+        if channel_message_id is not None:
+            update["channel_message_id"] = channel_message_id
+        self.db.vacancies.update_one({"id": vacancy_id}, {"$set": update})
 
-    def list_pending_vacancies(self, limit: int = 20) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM vacancies WHERE moderation_status = 'pending' ORDER BY updated_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+    def list_pending_vacancies(self, limit: int = 20) -> list[dict[str, Any]]:
+        cursor = self.db.vacancies.find({"moderation_status": "pending"}).sort("updated_at", DESCENDING).limit(limit)
+        return self._clean_list(cursor, "vacancies")
 
-    def find_seekers_by_profession(self, profession_id: int | None, profession_title: str) -> list[sqlite3.Row]:
+    # ------------------------------------------------------------------
+    # Moslashtirish (matching)
+    # ------------------------------------------------------------------
+    def find_seekers_by_profession(self, profession_id: int | None, profession_title: str) -> list[dict[str, Any]]:
         if profession_id is not None:
-            rows = self.conn.execute(
-                """
-                SELECT * FROM seekers
-                WHERE profession_id = ? AND moderation_status = 'approved'
-                ORDER BY id DESC
-                """,
-                (profession_id,),
-            ).fetchall()
+            cursor = self.db.seekers.find(
+                {"profession_id": profession_id, "moderation_status": "approved"}
+            ).sort("id", DESCENDING)
+            rows = self._clean_list(cursor, "seekers")
             if rows:
                 return rows
-        return self.conn.execute(
-            """
-            SELECT * FROM seekers
-            WHERE profession_title = ? AND moderation_status = 'approved'
-            ORDER BY id DESC
-            """,
-            (profession_title,),
-        ).fetchall()
+        cursor = self.db.seekers.find(
+            {"profession_title": profession_title, "moderation_status": "approved"}
+        ).sort("id", DESCENDING)
+        return self._clean_list(cursor, "seekers")
 
-    def find_vacancies_by_profession(self, profession_id: int | None, profession_title: str) -> list[sqlite3.Row]:
+    def find_vacancies_by_profession(self, profession_id: int | None, profession_title: str) -> list[dict[str, Any]]:
+        expires_clause = {"$or": [{"expires_at": None}, {"expires_at": {"$gte": now_iso()}}]}
         if profession_id is not None:
-            rows = self.conn.execute(
-                """
-                SELECT * FROM vacancies
-                WHERE profession_id = ?
-                    AND moderation_status = 'approved'
-                    AND active = 1
-                    AND (expires_at IS NULL OR expires_at >= ?)
-                ORDER BY id DESC
-                """,
-                (profession_id, now_iso()),
-            ).fetchall()
+            cursor = self.db.vacancies.find(
+                {"profession_id": profession_id, "moderation_status": "approved", "active": 1, **expires_clause}
+            ).sort("id", DESCENDING)
+            rows = self._clean_list(cursor, "vacancies")
             if rows:
                 return rows
-        return self.conn.execute(
-            """
-            SELECT * FROM vacancies
-            WHERE profession_title = ?
-                AND moderation_status = 'approved'
-                AND active = 1
-                AND (expires_at IS NULL OR expires_at >= ?)
-            ORDER BY id DESC
-            """,
-            (profession_title, now_iso()),
-        ).fetchall()
+        cursor = self.db.vacancies.find(
+            {"profession_title": profession_title, "moderation_status": "approved", "active": 1, **expires_clause}
+        ).sort("id", DESCENDING)
+        return self._clean_list(cursor, "vacancies")
 
+    # ------------------------------------------------------------------
+    # Saralashlar va qiziqishlar
+    # ------------------------------------------------------------------
     def save_candidate_action(self, employer_tg_id: int, vacancy_id: int, seeker_id: int, status: str) -> None:
         stamp = now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO candidate_actions(employer_tg_id, vacancy_id, seeker_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(employer_tg_id, vacancy_id, seeker_id) DO UPDATE SET
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
-            (employer_tg_id, vacancy_id, seeker_id, status, stamp, stamp),
+        existing = self.db.candidate_actions.find_one(
+            {"employer_tg_id": employer_tg_id, "vacancy_id": vacancy_id, "seeker_id": seeker_id}
         )
-        self.conn.commit()
+        if existing:
+            self.db.candidate_actions.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"status": status, "updated_at": stamp}},
+            )
+        else:
+            self.db.candidate_actions.insert_one(
+                {
+                    "id": self._next_id("candidate_actions"),
+                    "employer_tg_id": employer_tg_id,
+                    "vacancy_id": vacancy_id,
+                    "seeker_id": seeker_id,
+                    "status": status,
+                    "created_at": stamp,
+                    "updated_at": stamp,
+                }
+            )
 
     def create_interest(
         self,
@@ -972,166 +781,150 @@ class Database:
         status: str = "pending",
     ) -> int:
         stamp = now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO interests(vacancy_id, seeker_id, employer_tg_id, seeker_tg_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(vacancy_id, seeker_id) DO UPDATE SET
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
-            (vacancy_id, seeker_id, employer_tg_id, seeker_tg_id, status, stamp, stamp),
+        existing = self.db.interests.find_one({"vacancy_id": vacancy_id, "seeker_id": seeker_id})
+        if existing:
+            self.db.interests.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"status": status, "updated_at": stamp}},
+            )
+            return int(existing["id"])
+        interest_id = self._next_id("interests")
+        self.db.interests.insert_one(
+            {
+                "id": interest_id,
+                "vacancy_id": vacancy_id,
+                "seeker_id": seeker_id,
+                "employer_tg_id": employer_tg_id,
+                "seeker_tg_id": seeker_tg_id,
+                "status": status,
+                "created_at": stamp,
+                "updated_at": stamp,
+            }
         )
-        self.conn.commit()
-        row = self.conn.execute(
-            "SELECT id FROM interests WHERE vacancy_id = ? AND seeker_id = ?",
-            (vacancy_id, seeker_id),
-        ).fetchone()
-        return int(row["id"])
+        return interest_id
 
-    def get_interest(self, interest_id: int) -> sqlite3.Row | None:
-        return self.conn.execute("SELECT * FROM interests WHERE id = ?", (interest_id,)).fetchone()
+    def get_interest(self, interest_id: int) -> dict[str, Any] | None:
+        return self._clean(self.db.interests.find_one({"id": interest_id}), "interests")
 
     def update_interest_status(self, interest_id: int, status: str) -> None:
-        self.conn.execute(
-            "UPDATE interests SET status = ?, updated_at = ? WHERE id = ?",
-            (status, now_iso(), interest_id),
-        )
-        self.conn.commit()
+        self.db.interests.update_one({"id": interest_id}, {"$set": {"status": status, "updated_at": now_iso()}})
 
+    # ------------------------------------------------------------------
+    # Dashboard / eksport / qidiruv
+    # ------------------------------------------------------------------
     def dashboard_counts(self) -> dict[str, int]:
-        keys = {
-            "seekers": "SELECT COUNT(*) FROM seekers",
-            "employers": "SELECT COUNT(*) FROM employers",
-            "vacancies": "SELECT COUNT(*) FROM vacancies",
-            "interests": "SELECT COUNT(*) FROM interests",
-            "users": "SELECT COUNT(*) FROM users",
-            "admins": "SELECT COUNT(*) FROM admins",
-            "pending_seekers": "SELECT COUNT(*) FROM seekers WHERE moderation_status = 'pending'",
-            "pending_vacancies": "SELECT COUNT(*) FROM vacancies WHERE moderation_status = 'pending'",
-            "expired_vacancies": "SELECT COUNT(*) FROM vacancies WHERE moderation_status = 'expired'",
+        return {
+            "seekers": self.db.seekers.count_documents({}),
+            "employers": self.db.employers.count_documents({}),
+            "vacancies": self.db.vacancies.count_documents({}),
+            "interests": self.db.interests.count_documents({}),
+            "users": self.db.users.count_documents({}),
+            "admins": self.db.admins.count_documents({}),
+            "pending_seekers": self.db.seekers.count_documents({"moderation_status": "pending"}),
+            "pending_vacancies": self.db.vacancies.count_documents({"moderation_status": "pending"}),
+            "expired_vacancies": self.db.vacancies.count_documents({"moderation_status": "expired"}),
         }
-        return {key: int(self.conn.execute(query).fetchone()[0]) for key, query in keys.items()}
 
     def broadcast_users(self, target: str) -> list[int]:
         if target == "seekers":
-            rows = self.conn.execute("SELECT telegram_id FROM seekers").fetchall()
-            return [int(row["telegram_id"]) for row in rows]
+            return [int(r["telegram_id"]) for r in self.db.seekers.find({}, {"telegram_id": 1})]
         if target == "employers":
-            rows = self.conn.execute("SELECT telegram_id FROM employers").fetchall()
-            return [int(row["telegram_id"]) for row in rows]
-        rows = self.conn.execute("SELECT tg_id FROM users").fetchall()
-        return [int(row["tg_id"]) for row in rows]
+            return [int(r["telegram_id"]) for r in self.db.employers.find({}, {"telegram_id": 1})]
+        return [int(r["tg_id"]) for r in self.db.users.find({}, {"tg_id": 1})]
 
-    def filter_seekers(self, filters: dict[str, Any] | None = None) -> list[sqlite3.Row]:
+    def filter_seekers(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         filters = filters or {}
-        clauses: list[str] = []
-        params: list[Any] = []
+        query: dict[str, Any] = {}
 
         if filters.get("gender"):
-            clauses.append("gender = ?")
-            params.append(filters["gender"])
+            query["gender"] = filters["gender"]
         if filters.get("region"):
-            clauses.append("region = ?")
-            params.append(filters["region"])
+            query["region"] = filters["region"]
         if filters.get("district"):
-            clauses.append("district = ?")
-            params.append(filters["district"])
+            query["district"] = filters["district"]
         if filters.get("profession_id"):
-            clauses.append("profession_id = ?")
-            params.append(filters["profession_id"])
+            query["profession_id"] = filters["profession_id"]
+
+        age: dict[str, Any] = {}
         if filters.get("age_min") is not None:
-            clauses.append("age >= ?")
-            params.append(filters["age_min"])
+            age["$gte"] = filters["age_min"]
         if filters.get("age_max") is not None:
-            clauses.append("age <= ?")
-            params.append(filters["age_max"])
+            age["$lte"] = filters["age_max"]
+        if age:
+            query["age"] = age
+
         if filters.get("experience"):
-            clauses.append("experience LIKE ?")
-            params.append(f"%{filters['experience']}%")
+            query["experience"] = _regex(filters["experience"])
         if filters.get("job_type"):
-            clauses.append("(job_type = ? OR job_type = 'Farqi yo''q')")
-            params.append(filters["job_type"])
+            query["$or"] = [{"job_type": filters["job_type"]}, {"job_type": "Farqi yo'q"}]
         if filters.get("experience_years_min") is not None:
-            clauses.append("experience_years >= ?")
-            params.append(filters["experience_years_min"])
+            query["experience_years"] = {"$gte": filters["experience_years_min"]}
+
+        salary: dict[str, Any] = {}
         if filters.get("salary_min") is not None:
-            clauses.append("salary_amount >= ?")
-            params.append(filters["salary_min"])
+            salary["$gte"] = filters["salary_min"]
         if filters.get("salary_max") is not None:
-            clauses.append("salary_amount <= ?")
-            params.append(filters["salary_max"])
+            salary["$lte"] = filters["salary_max"]
+        if salary:
+            query["salary_amount"] = salary
+
         if filters.get("moderation_status"):
-            clauses.append("moderation_status = ?")
-            params.append(filters["moderation_status"])
+            query["moderation_status"] = filters["moderation_status"]
 
-        query = "SELECT * FROM seekers"
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY id DESC"
-        return self.conn.execute(query, params).fetchall()
+        return self._clean_list(self.db.seekers.find(query).sort("id", DESCENDING), "seekers")
 
-    def all_users(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall()
+    def all_users(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.users.find().sort("id", DESCENDING), "users")
 
-    def all_seekers(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM seekers ORDER BY id DESC").fetchall()
+    def all_seekers(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.seekers.find().sort("id", DESCENDING), "seekers")
 
-    def all_vacancies(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM vacancies ORDER BY id DESC").fetchall()
+    def all_vacancies(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.vacancies.find().sort("id", DESCENDING), "vacancies")
 
-    def all_employers(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM employers ORDER BY id DESC").fetchall()
+    def all_employers(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.employers.find().sort("id", DESCENDING), "employers")
 
-    def all_interests(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM interests ORDER BY id DESC").fetchall()
+    def all_interests(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.interests.find().sort("id", DESCENDING), "interests")
 
-    def all_candidate_actions(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM candidate_actions ORDER BY id DESC").fetchall()
+    def all_candidate_actions(self) -> list[dict[str, Any]]:
+        return self._clean_list(self.db.candidate_actions.find().sort("id", DESCENDING), "candidate_actions")
 
-    def search_admin(self, query: str, limit: int = 10) -> dict[str, list[sqlite3.Row]]:
+    def search_admin(self, query: str, limit: int = 10) -> dict[str, list[dict[str, Any]]]:
         query = query.strip()
-        like = f"%{query}%"
+        rx = _regex(query)
         numeric = int(query) if query.isdigit() else None
 
-        seeker_clauses = ["full_name LIKE ?", "phone LIKE ?", "region LIKE ?", "district LIKE ?", "profession_title LIKE ?"]
-        seeker_params: list[Any] = [like, like, like, like, like]
-        if numeric is not None:
-            seeker_clauses.extend(["id = ?", "telegram_id = ?", "age = ?"])
-            seeker_params.extend([numeric, numeric, numeric])
-
-        vacancy_clauses = [
-            "organization LIKE ?",
-            "full_name LIKE ?",
-            "phone LIKE ?",
-            "region LIKE ?",
-            "district LIKE ?",
-            "profession_title LIKE ?",
+        seeker_or: list[dict[str, Any]] = [
+            {"full_name": rx}, {"phone": rx}, {"region": rx}, {"district": rx}, {"profession_title": rx},
         ]
-        vacancy_params: list[Any] = [like, like, like, like, like, like]
         if numeric is not None:
-            vacancy_clauses.extend(["id = ?", "employer_tg_id = ?"])
-            vacancy_params.extend([numeric, numeric])
+            seeker_or.extend([{"id": numeric}, {"telegram_id": numeric}, {"age": numeric}])
 
-        employer_clauses = ["full_name LIKE ?", "organization LIKE ?", "phone LIKE ?", "region LIKE ?", "district LIKE ?"]
-        employer_params: list[Any] = [like, like, like, like, like]
+        vacancy_or: list[dict[str, Any]] = [
+            {"organization": rx}, {"full_name": rx}, {"phone": rx},
+            {"region": rx}, {"district": rx}, {"profession_title": rx},
+        ]
         if numeric is not None:
-            employer_clauses.extend(["id = ?", "telegram_id = ?"])
-            employer_params.extend([numeric, numeric])
+            vacancy_or.extend([{"id": numeric}, {"employer_tg_id": numeric}])
+
+        employer_or: list[dict[str, Any]] = [
+            {"full_name": rx}, {"organization": rx}, {"phone": rx}, {"region": rx}, {"district": rx},
+        ]
+        if numeric is not None:
+            employer_or.extend([{"id": numeric}, {"telegram_id": numeric}])
 
         return {
-            "seekers": self.conn.execute(
-                f"SELECT * FROM seekers WHERE {' OR '.join(seeker_clauses)} ORDER BY id DESC LIMIT ?",
-                (*seeker_params, limit),
-            ).fetchall(),
-            "vacancies": self.conn.execute(
-                f"SELECT * FROM vacancies WHERE {' OR '.join(vacancy_clauses)} ORDER BY id DESC LIMIT ?",
-                (*vacancy_params, limit),
-            ).fetchall(),
-            "employers": self.conn.execute(
-                f"SELECT * FROM employers WHERE {' OR '.join(employer_clauses)} ORDER BY id DESC LIMIT ?",
-                (*employer_params, limit),
-            ).fetchall(),
+            "seekers": self._clean_list(
+                self.db.seekers.find({"$or": seeker_or}).sort("id", DESCENDING).limit(limit), "seekers"
+            ),
+            "vacancies": self._clean_list(
+                self.db.vacancies.find({"$or": vacancy_or}).sort("id", DESCENDING).limit(limit), "vacancies"
+            ),
+            "employers": self._clean_list(
+                self.db.employers.find({"$or": employer_or}).sort("id", DESCENDING).limit(limit), "employers"
+            ),
         }
 
 

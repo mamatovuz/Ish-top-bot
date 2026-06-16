@@ -18,6 +18,13 @@ PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID", "-1004372898211").strip()
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "data/bot.sqlite3"))
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", "backups"))
 
+# MongoDB ulanishi
+MONGO_URI = os.getenv(
+    "MONGO_URI",
+    "mongodb://mongo:PbUsRTHTsTtvIGavTgKUogwmsSiFTnVK@acela.proxy.rlwy.net:24829",
+).strip()
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "ish_topish_bot").strip()
+
 
 def _parse_admin_ids(raw: str) -> set[int]:
     result: set[int] = set()

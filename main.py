@@ -13,7 +13,7 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ChatMemberUpdated, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import ADMIN_IDS, BOT_TOKEN, PUBLIC_CHANNEL_ID, PRIVATE_CHANNEL_ID, is_admin as is_env_admin
 from database import db
@@ -31,6 +31,7 @@ from keyboards import (
     candidate_filter_keyboard,
     candidate_offer_keyboard,
     cancel_menu,
+    channel_settings_keyboard,
     contact_menu,
     districts_menu,
     education_keyboard,
@@ -158,6 +159,10 @@ class AdminModerationReason(StatesGroup):
 
 class AdminSearchForm(StatesGroup):
     query = State()
+
+
+class ChannelSettingsForm(StatesGroup):
+    value = State()
 
 
 def clean_text(value: Any, default: str = "-") -> str:
@@ -1098,6 +1103,25 @@ async def send_admin_users_menu(message: Message) -> None:
     )
 
 
+@router.my_chat_member()
+async def on_bot_added_to_chat(event: ChatMemberUpdated, bot: Bot) -> None:
+    """Bot biror kanal/guruhga qo'shilganda/statusi o'zgarganda adminlarga chat ID ni yuboradi."""
+    chat = event.chat
+    if chat.type not in ("channel", "group", "supergroup"):
+        return
+    new_status = event.new_chat_member.status
+    text = (
+        "ℹ️ <b>Bot chat holati o'zgardi</b>\n\n"
+        f"📛 Nomi: {esc(chat.title)}\n"
+        f"📂 Turi: <code>{esc(chat.type)}</code>\n"
+        f"🆔 Chat ID: <code>{chat.id}</code>\n"
+        f"👤 Bot statusi: <code>{esc(new_status)}</code>\n\n"
+        "Maxfiy kanal sifatida ishlatish uchun ushbu ID ni <code>.env</code> faylidagi "
+        "<b>PRIVATE_CHANNEL_ID</b> ga yozing (yoki ochiq kanal uchun PUBLIC_CHANNEL_ID)."
+    )
+    await send_to_admins(bot, text)
+
+
 @router.message(CommandStart(), StateFilter("*"))
 async def start(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.clear()
@@ -1235,6 +1259,120 @@ async def admin_export_callback(callback: CallbackQuery) -> None:
     db.add_admin_log(callback.from_user.id, "export", kind, None, f"{count} rows")
     await callback.message.answer_document(FSInputFile(path), caption=f"📤 {count} ta yozuv eksport qilindi.")
     await callback.answer()
+
+
+async def send_channel_settings_menu(message: Message) -> None:
+    pub = vacancy_channel_id()
+    priv = seeker_channel_id()
+    not_set = "⚠️ o'rnatilmagan"
+    pub_text = f"<code>{esc(pub)}</code>" if pub else not_set
+    priv_text = f"<code>{esc(priv)}</code>" if priv else not_set
+    await message.answer(
+        "📡 <b>E'lon sozlamalari</b>\n\n"
+        "Bu yerda vakansiyalar va nomzodlar yuboriladigan kanallarni o'rnatasiz.\n\n"
+        "📢 <b>Ochiq kanal (vakansiyalar):</b>\n"
+        f"{pub_text}\n\n"
+        "🔒 <b>Maxfiy kanal (nomzodlar):</b>\n"
+        f"{priv_text}\n\n"
+        "ℹ️ Kanal <b>@username</b> yoki <b>-100...</b> ko'rinishidagi ID bo'lishi mumkin.\n"
+        "Bot o'sha kanalga <b>admin</b> qilib qo'shilgan bo'lishi shart.",
+        reply_markup=channel_settings_keyboard(),
+    )
+
+
+@router.message(F.text == "📡 E'lon sozlamalari", StateFilter("*"))
+async def admin_channel_settings(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if not is_admin(message.from_user.id):
+        return
+    await send_channel_settings_menu(message)
+
+
+@router.callback_query(F.data.startswith("chanset:"))
+async def admin_channel_settings_callback(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    action = callback.data.split(":")[1]
+
+    if action == "test":
+        await callback.answer()
+        await callback.message.answer("🧪 Kanallar tekshirilmoqda...")
+        for label, chat_id in (("📢 Ochiq", vacancy_channel_id()), ("🔒 Maxfiy", seeker_channel_id())):
+            if not chat_id:
+                await callback.message.answer(f"{label}: ⚠️ o'rnatilmagan")
+                continue
+            try:
+                chat = await bot.get_chat(chat_id)
+                me = await bot.get_chat_member(chat_id, (await bot.me()).id)
+                ok = me.status in ("administrator", "creator")
+                await callback.message.answer(
+                    f"{label}: {'✅' if ok else '⚠️'} <b>{esc(chat.title)}</b>\n"
+                    f"ID: <code>{chat.id}</code> | Bot statusi: <code>{esc(me.status)}</code>"
+                    + ("" if ok else "\n⚠️ Bot bu kanalda admin emas!")
+                )
+            except Exception as exc:
+                await callback.message.answer(f"{label}: ❌ Xatolik — <code>{esc(str(exc))}</code>")
+        return
+
+    if action in ("public", "private"):
+        await state.set_state(ChannelSettingsForm.value)
+        await state.update_data(channel_kind=action)
+        label = "📢 ochiq (vakansiya)" if action == "public" else "🔒 maxfiy (nomzodlar)"
+        await callback.message.answer(
+            f"{label} kanalini kiriting.\n\n"
+            "Masalan: <code>@mychannel</code> yoki <code>-1001234567890</code>\n\n"
+            "O'chirib tashlash uchun <code>-</code> belgisini yuboring.",
+            reply_markup=cancel_menu(),
+        )
+        await callback.answer()
+
+
+@router.message(ChannelSettingsForm.value, F.text != CANCEL)
+async def admin_channel_settings_save(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    kind = data.get("channel_kind")
+    value = clean_text(message.text, "")
+    await state.clear()
+
+    setting_key = "public_channel_id" if kind == "public" else "private_channel_id"
+    label = "📢 Ochiq (vakansiya)" if kind == "public" else "🔒 Maxfiy (nomzodlar)"
+
+    if value == "-":
+        db.set_setting(setting_key, "")
+        db.add_admin_log(message.from_user.id, "channel_setting", setting_key, None, "cleared")
+        await message.answer(f"{label} kanal o'chirildi.", reply_markup=admin_menu())
+        await send_channel_settings_menu(message)
+        return
+
+    # Tekshirish: bot kanalga ulana oladimi?
+    try:
+        chat = await bot.get_chat(value)
+        me = await bot.get_chat_member(value, (await bot.me()).id)
+        if me.status not in ("administrator", "creator"):
+            await message.answer(
+                f"⚠️ Kanal topildi (<b>{esc(chat.title)}</b>), lekin bot u yerda <b>admin emas</b>.\n"
+                "Avval botni kanalga admin qilib qo'shing, keyin qayta urinib ko'ring.",
+                reply_markup=admin_menu(),
+            )
+            return
+    except Exception as exc:
+        await message.answer(
+            f"❌ Bu kanalga ulanib bo'lmadi: <code>{esc(str(exc))}</code>\n\n"
+            "ID to'g'riligini va bot kanalda admin ekanini tekshiring.",
+            reply_markup=admin_menu(),
+        )
+        return
+
+    db.set_setting(setting_key, str(chat.id))
+    db.add_admin_log(message.from_user.id, "channel_setting", setting_key, None, str(chat.id))
+    await message.answer(
+        f"✅ {label} kanal o'rnatildi:\n<b>{esc(chat.title)}</b> (<code>{chat.id}</code>)",
+        reply_markup=admin_menu(),
+    )
+    await send_channel_settings_menu(message)
 
 
 @router.message(F.text == "💾 Backup", StateFilter("*"))
@@ -3055,6 +3193,23 @@ async def candidate_reject(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer("Rad etildi.")
 
 
+@router.message(F.forward_from_chat, StateFilter("*"))
+async def report_forwarded_chat_id(message: Message) -> None:
+    """Admin kanaldan xabar forward qilsa, o'sha kanalning ID sini qaytaradi."""
+    if not is_admin(message.from_user.id):
+        await message.answer("Menyudan kerakli bo'limni tanlang.", reply_markup=menu_for(message.from_user.id))
+        return
+    chat = message.forward_from_chat
+    await message.answer(
+        "🆔 <b>Forward qilingan chat</b>\n\n"
+        f"📛 Nomi: {esc(chat.title)}\n"
+        f"📂 Turi: <code>{esc(chat.type)}</code>\n"
+        f"🆔 Chat ID: <code>{chat.id}</code>\n\n"
+        "Maxfiy kanal uchun bu ID ni <code>.env</code> dagi <b>PRIVATE_CHANNEL_ID</b> ga yozing.",
+        reply_markup=admin_menu(),
+    )
+
+
 @router.message()
 async def unknown_message(message: Message) -> None:
     await message.answer("Menyudan kerakli bo'limni tanlang.", reply_markup=menu_for(message.from_user.id))
@@ -3072,7 +3227,7 @@ async def main() -> None:
     router.message.middleware(SubscriptionMiddleware())
     router.callback_query.middleware(SubscriptionMiddleware())
     dp.include_router(router)
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
 if __name__ == "__main__":

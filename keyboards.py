@@ -98,8 +98,8 @@ def admin_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🧰 Kasblar"), KeyboardButton(text="📣 Ommaviy xabar")],
             [KeyboardButton(text="👥 Nomzodlar"), KeyboardButton(text="🏢 Vakansiyalar")],
             [KeyboardButton(text="🔎 Qidiruv"), KeyboardButton(text="📤 Excel eksport")],
-            [KeyboardButton(text="💾 Backup"), KeyboardButton(text="🧾 Admin log")],
-            [KeyboardButton(text="🏠 Asosiy menyu")],
+            [KeyboardButton(text="📡 E'lon sozlamalari"), KeyboardButton(text="💾 Backup")],
+            [KeyboardButton(text="🧾 Admin log"), KeyboardButton(text="🏠 Asosiy menyu")],
         ],
         resize_keyboard=True,
     )
@@ -467,6 +467,16 @@ def vacancy_edit_fields_keyboard(vacancy_id: int) -> InlineKeyboardMarkup:
         builder.button(text=title, callback_data=f"vac_edit:{vacancy_id}:{field}")
     builder.adjust(2)
     return builder.as_markup()
+
+
+def channel_settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📢 Ochiq (vakansiya) kanalni o'rnatish", callback_data="chanset:public")],
+            [InlineKeyboardButton(text="🔒 Maxfiy (nomzodlar) kanalni o'rnatish", callback_data="chanset:private")],
+            [InlineKeyboardButton(text="🧪 Kanallarni tekshirish", callback_data="chanset:test")],
+        ]
+    )
 
 
 def admin_export_keyboard() -> InlineKeyboardMarkup:

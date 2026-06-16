@@ -2186,7 +2186,7 @@ async def my_seeker_edit_field(callback: CallbackQuery, state: FSMContext) -> No
             "education": "Yangi ma'lumot darajangizni kiriting.",
             "previous_job": "Yangi oldingi ish joyingizni kiriting.",
             "previous_salary": "Oldingi ish joyingizdagi oylikni kiriting.",
-            "current_salary": "Hozir olayotgan oyligingizni kiriting.",
+            "current_salary": "Hozir olishni xohlayotgan oylikni kiriting.",
             "extra": "Qo'shimcha ma'lumotni qisqa yozing: ko'nikmalar, ish vaqti, talablar yoki izohlar.",
         }
         markup = cancel_menu()
@@ -2580,7 +2580,7 @@ async def seeker_previous_salary(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(previous_salary=previous_salary, previous_salary_amount=amount)
     await state.set_state(SeekerForm.current_salary)
-    await message.answer("Hozir olayotgan oyligingizni kiriting.\nAgar hozir ishlamayotgan bo'lsangiz: <code>0</code>")
+    await message.answer("Hozir olishni xohlayotgan oylikni kiriting. <code>6 000 000</code>")
 
 
 @router.message(SeekerForm.current_salary)

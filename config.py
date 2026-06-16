@@ -8,7 +8,13 @@ load_dotenv()
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+
+# Vakansiyalar chop etiladigan ochiq kanal
 PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
+
+# Ishga arizalar (nomzodlar) yuboriladigan maxfiy kanal
+PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID", "").strip()
+
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "data/bot.sqlite3"))
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", "backups"))
 

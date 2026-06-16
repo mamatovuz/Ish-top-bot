@@ -15,7 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from config import ADMIN_IDS, BOT_TOKEN, PUBLIC_CHANNEL_ID, is_admin as is_env_admin
+from config import ADMIN_IDS, BOT_TOKEN, PUBLIC_CHANNEL_ID, PRIVATE_CHANNEL_ID, is_admin as is_env_admin
 from database import db
 from keyboards import (
     CANCEL,
@@ -272,8 +272,20 @@ def parse_birth_date(text: Any) -> tuple[str, int] | None:
     return birth.strftime("%d.%m.%Y"), age
 
 
-def public_channel_id() -> str:
+# ---------------------------------------------------------------
+# KANAL ID LARI
+# vacancy_channel_id() -> OCHIQ kanal (vakansiyalar uchun)
+# seeker_channel_id()  -> MAXFIY kanal (nomzodlar uchun)
+# ---------------------------------------------------------------
+
+def vacancy_channel_id() -> str:
+    """Vakansiyalar chop etiladigan OCHIQ kanal ID si."""
     return db.get_setting("public_channel_id", "") or PUBLIC_CHANNEL_ID
+
+
+def seeker_channel_id() -> str:
+    """Nomzodlar (ishga ariza) yuboriladigan MAXFIY kanal ID si."""
+    return db.get_setting("private_channel_id", "") or PRIVATE_CHANNEL_ID
 
 
 def all_admin_ids() -> set[int]:
@@ -374,10 +386,10 @@ def seeker_card(seeker: Any, *, hide_phone: bool = True) -> str:
         f"🚻 {esc(row_get(seeker, 'gender'))}\n"
         f"📍 {esc(location_text(seeker))}\n"
         f"💼 {esc(row_get(seeker, 'profession_title'))}\n"
-        f"🧭 Ish turi: {esc(row_get(seeker, 'job_type', 'Ko‘rsatilmagan'))}\n"
+        f"🧭 Ish turi: {esc(row_get(seeker, 'job_type', 'Korsatilmagan'))}\n"
         f"📈 Tajriba: {esc(row_get(seeker, 'experience'))}\n"
         f"🔢 Tajriba yili: {esc(row_get(seeker, 'experience_years', 0))}\n"
-        f"🎓 Ma'lumot: {esc(row_get(seeker, 'education', 'Ko‘rsatilmagan'))}\n"
+        f"🎓 Ma'lumot: {esc(row_get(seeker, 'education', 'Korsatilmagan'))}\n"
         f"📊 Excel: {esc(row_get(seeker, 'excel_level', '-'))}\n"
         f"📝 Word: {esc(row_get(seeker, 'word_level', '-'))}\n"
         f"💸 Oldingi oylik: {esc(row_get(seeker, 'previous_salary', '-'))}\n"
@@ -386,7 +398,7 @@ def seeker_card(seeker: Any, *, hide_phone: bool = True) -> str:
         f"📎 Rezyume: {esc(resume)}\n"
         f"🛂 Holat: {moderation_status_text(clean_text(row_get(seeker, 'moderation_status'), 'pending'))}\n"
         f"{'📝 Izoh: ' + esc(note) + chr(10) if note else ''}"
-        f"ℹ️ Qo'shimcha: {esc(row_get(seeker, 'extra', 'Yo‘q'))}"
+        f"ℹ️ Qo'shimcha: {esc(row_get(seeker, 'extra', 'Yoq'))}"
     )
 
 
@@ -415,7 +427,7 @@ def public_seeker_card(seeker: Any) -> str:
         f"💰 Hozirgi kutayotgan oylik: {esc(row_get(seeker, 'current_salary', row_get(seeker, 'salary')))}\n"
         f"📞 Aloqa: {esc(row_get(seeker, 'phone'))}\n"
         f"📎 Rezyume: {esc(resume)}\n\n"
-        f"ℹ️ Qo'shimcha: {esc(row_get(seeker, 'extra', 'Yo‘q'))}"
+        f"ℹ️ Qo'shimcha: {esc(row_get(seeker, 'extra', 'Yoq'))}"
     )
 
 
@@ -498,7 +510,7 @@ def seeker_summary(data: dict[str, Any]) -> str:
         f"🏢 Oldingi ish joyi: {esc(data.get('previous_job'))}\n"
         f"💸 Oldingi ish joyidagi oylik: {esc(data.get('previous_salary'))}\n"
         f"💰 Hozir olayotgan oylik: {esc(data.get('current_salary'))}\n"
-        f"📎 Rezyume: {'bor' if data.get('resume_file_id') else 'yo‘q'}\n"
+        f"📎 Rezyume: {'bor' if data.get('resume_file_id') else 'yoq'}\n"
         f"ℹ️ Qo'shimcha: {esc(data.get('extra'))}"
     )
 
@@ -576,7 +588,8 @@ class SubscriptionMiddleware(BaseMiddleware):
 
 
 async def publish_seeker(bot: Bot, seeker: Any) -> None:
-    channel_id = public_channel_id()
+    """Nomzodni MAXFIY kanalga yuboradi."""
+    channel_id = seeker_channel_id()
     if not channel_id:
         return
     try:
@@ -609,7 +622,8 @@ async def publish_seeker(bot: Bot, seeker: Any) -> None:
 
 
 async def publish_vacancy(bot: Bot, vacancy: Any) -> None:
-    channel_id = public_channel_id()
+    """Vakansiyani OCHIQ kanalga yuboradi."""
+    channel_id = vacancy_channel_id()
     if not channel_id:
         return
     try:
@@ -1031,10 +1045,16 @@ async def send_admin_subscription_menu(message: Message) -> None:
     channels = db.list_channels()
     status = "🟢 Yoqilgan" if enabled else "🔴 O'chirilgan"
     channel_text = "\n".join(f"• {esc(ch['title'])} ({esc(ch['chat_id'])})" for ch in channels) or "Kanal yo'q."
+    priv_id = seeker_channel_id()
+    vac_id = vacancy_channel_id()
     await message.answer(
         f"🔐 <b>Majburiy obuna</b>\n\n"
         f"Holat: <b>{status}</b>\n\n"
-        f"📣 <b>Kanallar</b>\n{channel_text}",
+        f"📣 <b>Obuna kanallari</b>\n{channel_text}\n\n"
+        f"🔒 <b>Nomzodlar maxfiy kanali:</b>\n"
+        f"{'<code>' + priv_id + '</code>' if priv_id else '⚠️ PRIVATE_CHANNEL_ID .env da kiritilmagan'}\n\n"
+        f"📢 <b>Vakansiyalar ochiq kanali:</b>\n"
+        f"{'<code>' + vac_id + '</code>' if vac_id else '⚠️ PUBLIC_CHANNEL_ID .env da kiritilmagan'}",
         reply_markup=admin_subscription_keyboard(enabled, channels),
     )
 
@@ -1423,7 +1443,7 @@ async def admin_moderate_seeker(callback: CallbackQuery, state: FSMContext, bot:
             reply_markup=menu_for(int(row_get(seeker, "telegram_id"))),
         )
         await send_matched_vacancies_to_seeker(bot, seeker)
-        await callback.message.answer("✅ Ariza tasdiqlandi va kanalga yuborildi.")
+        await callback.message.answer("✅ Ariza tasdiqlandi va maxfiy kanalga yuborildi.")
     else:
         await cleanup_moderation_requests(bot, "seeker", seeker_id, callback.from_user.id, callback.message)
         await state.set_state(AdminModerationReason.seeker_reason)
@@ -1471,7 +1491,7 @@ async def admin_moderate_vacancy(callback: CallbackQuery, state: FSMContext, bot
         )
         await send_matches_to_employer(bot, vacancy)
         await notify_seekers_about_new_vacancy(bot, vacancy)
-        await callback.message.answer("✅ Vakansiya tasdiqlandi va kanalga yuborildi.")
+        await callback.message.answer("✅ Vakansiya tasdiqlandi va ochiq kanalga yuborildi.")
     else:
         await cleanup_moderation_requests(bot, "vacancy", vacancy_id, callback.from_user.id, callback.message)
         await state.set_state(AdminModerationReason.vacancy_reason)
@@ -2642,7 +2662,7 @@ async def seeker_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -
     await send_seeker_moderation_to_admins(bot, seeker)
     await state.clear()
     await callback.message.answer(
-        "✅ Arizangiz qabul qilindi.\n\nAriza admin tekshiruviga yuborildi. Tasdiqlangandan keyin kanalga chiqadi va sizga mos vakansiyalar yuboriladi.",
+        "✅ Arizangiz qabul qilindi.\n\nAriza admin tekshiruviga yuborildi. Tasdiqlangandan keyin maxfiy kanalga chiqadi va sizga mos vakansiyalar yuboriladi.",
         reply_markup=menu_for(callback.from_user.id),
     )
     await callback.answer()
@@ -2808,7 +2828,7 @@ async def vacancy_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     await send_vacancy_moderation_to_admins(bot, vacancy)
     await state.clear()
     await callback.message.answer(
-        "✅ Vakansiya yaratildi.\n\nVakansiya admin tekshiruviga yuborildi. Tasdiqlangandan keyin kanalga chiqadi va mos nomzodlar yuboriladi.",
+        "✅ Vakansiya yaratildi.\n\nVakansiya admin tekshiruviga yuborildi. Tasdiqlangandan keyin ochiq kanalga chiqadi va mos nomzodlar yuboriladi.",
         reply_markup=menu_for(callback.from_user.id),
     )
     await callback.answer()

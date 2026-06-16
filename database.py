@@ -1071,6 +1071,9 @@ class Database:
         query += " ORDER BY id DESC"
         return self.conn.execute(query, params).fetchall()
 
+    def all_users(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall()
+
     def all_seekers(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM seekers ORDER BY id DESC").fetchall()
 

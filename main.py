@@ -966,6 +966,18 @@ def export_rows_to_excel(rows, headers: list[tuple[str, str]], filename: str, ti
 
 
 def export_dataset(kind: str) -> tuple[Path, int]:
+    if kind == "users":
+        rows = db.all_users()
+        headers = [
+            ("ID", "id"),
+            ("Telegram ID", "tg_id"),
+            ("Username", "username"),
+            ("Ism familiya", "full_name"),
+            ("Rol", "role"),
+            ("Yaratilgan", "created_at"),
+            ("Yangilangan", "updated_at"),
+        ]
+        return export_rows_to_excel(rows, headers, "foydalanuvchilar.xlsx", "Foydalanuvchilar"), len(rows)
     if kind == "seekers":
         rows = db.all_seekers()
         return export_seekers_to_excel(rows, "nomzodlar.xlsx"), len(rows)

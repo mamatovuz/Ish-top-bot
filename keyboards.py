@@ -473,6 +473,9 @@ def admin_export_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(text="👥 Foydalanuvchilar", callback_data="export:users"),
+            ],
+            [
                 InlineKeyboardButton(text="👨‍💼 Nomzodlar", callback_data="export:seekers"),
                 InlineKeyboardButton(text="🏢 Vakansiyalar", callback_data="export:vacancies"),
             ],

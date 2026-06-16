@@ -1,10 +1,12 @@
-from aiogram.types import (
+﻿from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from locations import DISTRICTS
 
 
 REGIONS = [
@@ -78,6 +80,12 @@ def contact_menu() -> ReplyKeyboardMarkup:
 
 def regions_menu() -> ReplyKeyboardMarkup:
     rows = [[KeyboardButton(text=region)] for region in REGIONS]
+    rows.append([KeyboardButton(text=CANCEL)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def districts_menu(region: str) -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton(text=district)] for district in DISTRICTS.get(region, [])]
     rows.append([KeyboardButton(text=CANCEL)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
@@ -289,6 +297,7 @@ def seeker_edit_fields_keyboard() -> InlineKeyboardMarkup:
         ("🚻 Jins", "gender"),
         ("📞 Telefon", "phone"),
         ("📍 Hudud", "region"),
+        ("Tuman", "district"),
         ("💼 Kasb", "profession"),
         ("🧭 Ish turi", "job_type"),
         ("📈 Tajriba", "experience"),
@@ -446,6 +455,7 @@ def vacancy_edit_fields_keyboard(vacancy_id: int) -> InlineKeyboardMarkup:
         ("Tashkilot", "organization"),
         ("Telefon", "phone"),
         ("Viloyat", "region"),
+        ("Tuman", "district"),
         ("Kasb", "profession"),
         ("Xodim soni", "staff_count"),
         ("Ish turi", "job_type"),
@@ -476,3 +486,5 @@ def admin_export_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+

@@ -32,6 +32,7 @@ from keyboards import (
     candidate_offer_keyboard,
     cancel_menu,
     contact_menu,
+    districts_menu,
     education_keyboard,
     employer_candidate_keyboard,
     gender_menu,
@@ -57,6 +58,7 @@ from keyboards import (
     vacancy_moderation_keyboard,
     employer_candidate_request_keyboard,
 )
+from locations import DISTRICTS, REGIONS
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -79,6 +81,7 @@ class SeekerForm(StatesGroup):
     gender = State()
     phone = State()
     region = State()
+    district = State()
     profession = State()
     job_type = State()
     experience = State()
@@ -98,6 +101,7 @@ class VacancyForm(StatesGroup):
     organization = State()
     phone = State()
     region = State()
+    district = State()
     profession = State()
     staff_count = State()
     job_type = State()
@@ -128,6 +132,7 @@ class AdminCandidateFilter(StatesGroup):
     gender = State()
     age = State()
     region = State()
+    district = State()
     experience = State()
     profession = State()
     job_type = State()
@@ -141,6 +146,7 @@ class AdminVacancyEdit(StatesGroup):
 
 class SeekerEditForm(StatesGroup):
     value = State()
+    district = State()
     profession = State()
     resume = State()
 
@@ -175,6 +181,32 @@ def row_get(row: Any, key: str, default: Any = "") -> Any:
     except (KeyError, IndexError):
         return default
     return default if value is None else value
+
+
+def is_valid_region(value: Any) -> bool:
+    return clean_text(value, "") in REGIONS
+
+
+def is_valid_district(region: Any, district: Any) -> bool:
+    region_text = clean_text(region, "")
+    district_text = clean_text(district, "")
+    return district_text in DISTRICTS.get(region_text, [])
+
+
+def location_text(row: Any) -> str:
+    region = clean_text(row_get(row, "region"), "")
+    district = clean_text(row_get(row, "district"), "")
+    if region and district:
+        return f"{region}, {district}"
+    return region or district or "-"
+
+
+def location_from_data(data: dict[str, Any]) -> str:
+    region = clean_text(data.get("region"), "")
+    district = clean_text(data.get("district"), "")
+    if region and district:
+        return f"{region}, {district}"
+    return region or district or "-"
 
 
 def parse_positive_int(text: str, *, minimum: int = 1, maximum: int = 1000) -> int | None:
@@ -287,6 +319,10 @@ def match_score(seeker: Any, vacancy: Any) -> int:
 
     if clean_text(row_get(seeker, "region"), "").lower() == clean_text(row_get(vacancy, "region"), "").lower():
         score += 15
+    seeker_district = clean_text(row_get(seeker, "district"), "").lower()
+    vacancy_district = clean_text(row_get(vacancy, "district"), "").lower()
+    if seeker_district and vacancy_district and seeker_district == vacancy_district:
+        score += 10
 
     seeker_job_type = clean_text(row_get(seeker, "job_type"), "").lower()
     vacancy_job_type = clean_text(row_get(vacancy, "job_type"), "").lower()
@@ -336,7 +372,7 @@ def seeker_card(seeker: Any, *, hide_phone: bool = True) -> str:
         f"🎂 Tug'ilgan sana: {esc(birth_date or '-')}"
         f"{' (' + esc(row_get(seeker, 'age')) + ' yosh)' if row_get(seeker, 'age') else ''}\n"
         f"🚻 {esc(row_get(seeker, 'gender'))}\n"
-        f"📍 {esc(row_get(seeker, 'region'))}\n"
+        f"📍 {esc(location_text(seeker))}\n"
         f"💼 {esc(row_get(seeker, 'profession_title'))}\n"
         f"🧭 Ish turi: {esc(row_get(seeker, 'job_type', 'Ko‘rsatilmagan'))}\n"
         f"📈 Tajriba: {esc(row_get(seeker, 'experience'))}\n"
@@ -368,7 +404,7 @@ def public_seeker_card(seeker: Any) -> str:
         f"👤 <b>{esc(row_get(seeker, 'full_name'))}</b>\n"
         f"🎂 Tug'ilgan sana: {birth_line}\n"
         f"🚻 Jins: {esc(row_get(seeker, 'gender'))}\n"
-        f"📍 Hudud: {esc(row_get(seeker, 'region'))}\n"
+        f"📍 Hudud: {esc(location_text(seeker))}\n"
         f"💼 Kasb: {esc(row_get(seeker, 'profession_title'))}\n"
         f"🧭 Ish turi: {esc(row_get(seeker, 'job_type', '-'))}\n\n"
         f"📈 Tajriba: {esc(row_get(seeker, 'experience'))}\n"
@@ -393,7 +429,7 @@ def seeker_match_card(seeker: Any) -> str:
         f"📄 <b>Nomzod #{row_get(seeker, 'id')}</b>\n"
         f"👤 <b>{esc(row_get(seeker, 'full_name'))}</b>\n"
         f"🎂 Tug'ilgan sana: {birth_line}\n"
-        f"📍 Hudud: {esc(row_get(seeker, 'region'))}\n"
+        f"📍 Hudud: {esc(location_text(seeker))}\n"
         f"💼 Kasb: {esc(row_get(seeker, 'profession_title'))}\n"
         f"🧭 Ish turi: {esc(row_get(seeker, 'job_type', '-'))}\n"
         f"📈 Tajriba: {esc(row_get(seeker, 'experience'))}\n"
@@ -411,7 +447,7 @@ def vacancy_card(vacancy: Any) -> str:
         f"👤 Mas'ul: {esc(row_get(vacancy, 'full_name'))}\n"
         f"🏢 Tashkilot: {esc(row_get(vacancy, 'organization'))}\n"
         f"📞 Telefon: {esc(row_get(vacancy, 'phone'))}\n"
-        f"📍 Viloyat: {esc(row_get(vacancy, 'region'))}\n"
+        f"📍 Hudud: {esc(location_text(vacancy))}\n"
         f"💼 Mutaxassislik: {esc(row_get(vacancy, 'profession_title'))}\n"
         f"👥 Xodim soni: {esc(row_get(vacancy, 'staff_count'))}\n"
         f"🧭 Ish turi: {esc(row_get(vacancy, 'job_type'))}\n"
@@ -433,7 +469,7 @@ def public_vacancy_card(vacancy: Any) -> str:
         f"📌 <b>Vakansiya #{row_get(vacancy, 'id')}</b>\n"
         f"🏢 Tashkilot: <b>{esc(organization)}</b>\n"
         f"👤 Mas'ul: {esc(row_get(vacancy, 'full_name'))}\n"
-        f"📍 Hudud: {esc(row_get(vacancy, 'region'))}\n"
+        f"📍 Hudud: {esc(location_text(vacancy))}\n"
         f"💼 Mutaxassislik: {esc(row_get(vacancy, 'profession_title'))}\n"
         f"👥 Kerakli xodim: {esc(row_get(vacancy, 'staff_count'))}\n"
         f"🧭 Ish turi: {esc(row_get(vacancy, 'job_type'))}\n\n"
@@ -451,7 +487,7 @@ def seeker_summary(data: dict[str, Any]) -> str:
         f"🎂 Tug'ilgan sana: {esc(data.get('birth_date'))} ({esc(data.get('age'))} yosh)\n"
         f"🚻 Jins: {esc(data.get('gender'))}\n"
         f"📞 Telefon: {esc(data.get('phone'))}\n"
-        f"📍 Hudud: {esc(data.get('region'))}\n"
+        f"📍 Hudud: {esc(location_from_data(data))}\n"
         f"💼 Kasb: {esc(data.get('profession_title'))}\n"
         f"🧭 Ish turi: {esc(data.get('job_type'))}\n"
         f"📈 Tajriba: {esc(data.get('experience'))}\n"
@@ -473,7 +509,7 @@ def vacancy_summary(data: dict[str, Any]) -> str:
         f"👤 Ism familiya: {esc(data.get('full_name'))}\n"
         f"🏢 Tashkilot: {esc(data.get('organization'))}\n"
         f"📞 Telefon: {esc(data.get('phone'))}\n"
-        f"📍 Viloyat: {esc(data.get('region'))}\n"
+        f"📍 Hudud: {esc(location_from_data(data))}\n"
         f"💼 Mutaxassislik: {esc(data.get('profession_title'))}\n"
         f"👥 Kerakli xodim: {esc(data.get('staff_count'))}\n"
         f"🧭 Ish turi: {esc(data.get('job_type'))}\n"
@@ -784,7 +820,7 @@ async def notify_candidate_about_interest(bot: Bot, interest_id: int, vacancy: A
         f"🏢 {esc(row_get(vacancy, 'organization'))}\n"
         f"💼 {esc(row_get(vacancy, 'profession_title'))}\n"
         f"💰 {esc(row_get(vacancy, 'salary'))} so'm\n"
-        f"📍 {esc(row_get(vacancy, 'region'))}"
+        f"📍 {esc(location_text(vacancy))}"
     )
     await bot.send_message(
         int(row_get(seeker, "telegram_id")),
@@ -801,6 +837,8 @@ def filter_status_text(filters: dict[str, Any]) -> str:
         parts.append(f"🎂 Yosh: {filters.get('age_min', '')}-{filters.get('age_max', '')}")
     if filters.get("region"):
         parts.append(f"📍 Hudud: {filters['region']}")
+    if filters.get("district"):
+        parts.append(f"🏙 Tuman: {filters['district']}")
     if filters.get("profession_title"):
         parts.append(f"💼 Kasb: {filters['profession_title']}")
     if filters.get("experience"):
@@ -838,6 +876,7 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
             "Jins",
             "Telefon",
             "Hudud",
+            "Tuman",
             "Kasb",
             "Ish turi",
             "Tajriba",
@@ -867,6 +906,7 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
                 row_get(seeker, "gender"),
                 row_get(seeker, "phone"),
                 row_get(seeker, "region"),
+                row_get(seeker, "district"),
                 row_get(seeker, "profession_title"),
                 row_get(seeker, "job_type"),
                 row_get(seeker, "experience"),
@@ -924,6 +964,7 @@ def export_dataset(kind: str) -> tuple[Path, int]:
             ("Tashkilot", "organization"),
             ("Telefon", "phone"),
             ("Hudud", "region"),
+            ("Tuman", "district"),
             ("Kasb", "profession_title"),
             ("Xodim soni", "staff_count"),
             ("Ish turi", "job_type"),
@@ -945,6 +986,7 @@ def export_dataset(kind: str) -> tuple[Path, int]:
             ("Tashkilot", "organization"),
             ("Telefon", "phone"),
             ("Hudud", "region"),
+            ("Tuman", "district"),
             ("Yaratilgan", "created_at"),
         ]
         return export_rows_to_excel(rows, headers, "ish_beruvchilar.xlsx", "Ish beruvchilar"), len(rows)
@@ -1139,7 +1181,7 @@ async def admin_search_run(message: Message, state: FSMContext) -> None:
             f"👤 {esc(row_get(employer, 'full_name'))}\n"
             f"🏢 {esc(row_get(employer, 'organization'))}\n"
             f"📞 {esc(row_get(employer, 'phone'))}\n"
-            f"📍 {esc(row_get(employer, 'region'))}"
+            f"📍 {esc(location_text(employer))}"
         )
 
 
@@ -2139,6 +2181,7 @@ async def my_seeker_edit_field(callback: CallbackQuery, state: FSMContext) -> No
             "gender": "Jinsingizni tanlang.",
             "phone": "Yangi telefon raqamingizni qo'lda kiriting.\nMisol: <code>+998 90 123 45 67</code>",
             "region": "Yangi hududni tanlang.",
+            "district": "Yangi tumanni tanlang.",
             "experience": "Yangi tajribangizni kiriting.",
             "education": "Yangi ma'lumot darajangizni kiriting.",
             "previous_job": "Yangi oldingi ish joyingizni kiriting.",
@@ -2153,6 +2196,8 @@ async def my_seeker_edit_field(callback: CallbackQuery, state: FSMContext) -> No
             markup = contact_menu()
         elif field == "region":
             markup = regions_menu()
+        elif field == "district":
+            markup = districts_menu(row_get(seeker, "region"))
         await callback.message.answer(prompts.get(field, "Yangi qiymatni kiriting."), reply_markup=markup)
     await callback.answer()
 
@@ -2440,7 +2485,24 @@ async def seeker_phone(message: Message, state: FSMContext) -> None:
 
 @router.message(SeekerForm.region)
 async def seeker_region(message: Message, state: FSMContext) -> None:
-    await state.update_data(region=clean_text(message.text))
+    region = clean_text(message.text)
+    if not is_valid_region(region):
+        await message.answer("Iltimos, viloyatni tugmalardan tanlang.", reply_markup=regions_menu())
+        return
+    await state.update_data(region=region, district=None)
+    await state.set_state(SeekerForm.district)
+    await message.answer("Tuman yoki shaharni tanlang.", reply_markup=districts_menu(region))
+
+
+@router.message(SeekerForm.district)
+async def seeker_district(message: Message, state: FSMContext) -> None:
+    district = clean_text(message.text)
+    data = await state.get_data()
+    region = data.get("region")
+    if not is_valid_district(region, district):
+        await message.answer("Iltimos, tumanni tugmalardan tanlang.", reply_markup=districts_menu(region))
+        return
+    await state.update_data(district=district)
     await state.set_state(SeekerForm.profession)
     await message.answer("Kasbingizni tanlang.", reply_markup=profession_keyboard(db.list_professions(), "seeker_prof"))
 
@@ -2658,7 +2720,24 @@ async def vacancy_phone(message: Message, state: FSMContext) -> None:
 
 @router.message(VacancyForm.region)
 async def vacancy_region(message: Message, state: FSMContext) -> None:
-    await state.update_data(region=clean_text(message.text))
+    region = clean_text(message.text)
+    if not is_valid_region(region):
+        await message.answer("Iltimos, viloyatni tugmalardan tanlang.", reply_markup=regions_menu())
+        return
+    await state.update_data(region=region, district=None)
+    await state.set_state(VacancyForm.district)
+    await message.answer("Tuman yoki shaharni tanlang.", reply_markup=districts_menu(region))
+
+
+@router.message(VacancyForm.district)
+async def vacancy_district(message: Message, state: FSMContext) -> None:
+    district = clean_text(message.text)
+    data = await state.get_data()
+    region = data.get("region")
+    if not is_valid_district(region, district):
+        await message.answer("Iltimos, tumanni tugmalardan tanlang.", reply_markup=districts_menu(region))
+        return
+    await state.update_data(district=district)
     await state.set_state(VacancyForm.profession)
     await message.answer("Kerakli mutaxassislikni tanlang.", reply_markup=profession_keyboard(db.list_professions(), "vac_prof"))
 

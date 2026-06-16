@@ -77,6 +77,7 @@ class Database:
                 gender TEXT NOT NULL,
                 phone TEXT NOT NULL,
                 region TEXT NOT NULL,
+                district TEXT,
                 profession_id INTEGER,
                 profession_title TEXT NOT NULL,
                 experience TEXT NOT NULL,
@@ -96,6 +97,7 @@ class Database:
                 organization TEXT NOT NULL,
                 phone TEXT NOT NULL,
                 region TEXT NOT NULL,
+                district TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -107,6 +109,7 @@ class Database:
                 organization TEXT NOT NULL,
                 phone TEXT NOT NULL,
                 region TEXT NOT NULL,
+                district TEXT,
                 profession_id INTEGER,
                 profession_title TEXT NOT NULL,
                 staff_count INTEGER NOT NULL,
@@ -216,6 +219,7 @@ class Database:
         self._add_column_if_missing("seekers", "resume_file_id", "TEXT")
         self._add_column_if_missing("seekers", "resume_file_name", "TEXT")
         self._add_column_if_missing("seekers", "birth_date", "TEXT")
+        self._add_column_if_missing("seekers", "district", "TEXT")
         self._add_column_if_missing("seekers", "job_type", "TEXT")
         self._add_column_if_missing("seekers", "experience_years", "INTEGER")
         self._add_column_if_missing("seekers", "excel_level", "TEXT")
@@ -234,6 +238,7 @@ class Database:
         self._add_column_if_missing("seekers", "channel_message_id", "INTEGER")
 
         self._add_column_if_missing("vacancies", "salary_amount", "INTEGER")
+        self._add_column_if_missing("vacancies", "district", "TEXT")
         self._add_column_if_missing("vacancies", "min_experience_years", "INTEGER")
         self._add_column_if_missing("vacancies", "moderation_status", "TEXT NOT NULL DEFAULT 'pending'")
         self._add_column_if_missing("vacancies", "moderation_note", "TEXT")
@@ -243,6 +248,8 @@ class Database:
         self._add_column_if_missing("vacancies", "channel_chat_id", "TEXT")
         self._add_column_if_missing("vacancies", "channel_message_id", "INTEGER")
         self._add_column_if_missing("vacancies", "expires_at", "TEXT")
+
+        self._add_column_if_missing("employers", "district", "TEXT")
 
         if self.get_setting("migration_moderation_v1", "0") != "1":
             self.conn.execute("UPDATE seekers SET moderation_status = 'approved', approved_at = COALESCE(approved_at, updated_at)")
@@ -467,7 +474,7 @@ class Database:
         self.conn.execute(
             """
             INSERT INTO seekers(
-                telegram_id, photo_id, full_name, age, gender, phone, region,
+                telegram_id, photo_id, full_name, age, gender, phone, region, district,
                 birth_date, profession_id, profession_title, job_type, experience, experience_years,
                 education, excel_level, word_level, previous_job,
                 previous_salary, previous_salary_amount, current_salary, current_salary_amount,
@@ -475,7 +482,7 @@ class Database:
                 moderation_status, moderation_note, moderated_by, approved_at, published_at,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 photo_id = excluded.photo_id,
                 full_name = excluded.full_name,
@@ -483,6 +490,7 @@ class Database:
                 gender = excluded.gender,
                 phone = excluded.phone,
                 region = excluded.region,
+                district = excluded.district,
                 birth_date = excluded.birth_date,
                 profession_id = excluded.profession_id,
                 profession_title = excluded.profession_title,
@@ -517,6 +525,7 @@ class Database:
                 data["gender"],
                 data["phone"],
                 data["region"],
+                data.get("district"),
                 data.get("birth_date"),
                 data.get("profession_id"),
                 data["profession_title"],
@@ -560,6 +569,7 @@ class Database:
             "gender",
             "phone",
             "region",
+            "district",
             "profession_id",
             "profession_title",
             "job_type",
@@ -692,13 +702,14 @@ class Database:
         stamp = now_iso()
         self.conn.execute(
             """
-            INSERT INTO employers(telegram_id, full_name, organization, phone, region, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO employers(telegram_id, full_name, organization, phone, region, district, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(telegram_id) DO UPDATE SET
                 full_name = excluded.full_name,
                 organization = excluded.organization,
                 phone = excluded.phone,
                 region = excluded.region,
+                district = excluded.district,
                 updated_at = excluded.updated_at
             """,
             (
@@ -707,6 +718,7 @@ class Database:
                 data["organization"],
                 data["phone"],
                 data["region"],
+                data.get("district"),
                 stamp,
                 stamp,
             ),
@@ -721,13 +733,13 @@ class Database:
         cur = self.conn.execute(
             """
             INSERT INTO vacancies(
-                employer_tg_id, full_name, organization, phone, region, profession_id,
+                employer_tg_id, full_name, organization, phone, region, district, profession_id,
                 profession_title, staff_count, job_type, salary, salary_amount,
                 min_experience_years, requirements, expires_at,
                 moderation_status, moderation_note, moderated_by, approved_at, published_at,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, ?)
             """,
             (
                 employer_tg_id,
@@ -735,6 +747,7 @@ class Database:
                 data["organization"],
                 data["phone"],
                 data["region"],
+                data.get("district"),
                 data.get("profession_id"),
                 data["profession_title"],
                 int(data["staff_count"]),
@@ -791,6 +804,7 @@ class Database:
             "organization",
             "phone",
             "region",
+            "district",
             "profession_id",
             "profession_title",
             "staff_count",
@@ -1020,6 +1034,9 @@ class Database:
         if filters.get("region"):
             clauses.append("region = ?")
             params.append(filters["region"])
+        if filters.get("district"):
+            clauses.append("district = ?")
+            params.append(filters["district"])
         if filters.get("profession_id"):
             clauses.append("profession_id = ?")
             params.append(filters["profession_id"])
@@ -1074,20 +1091,27 @@ class Database:
         like = f"%{query}%"
         numeric = int(query) if query.isdigit() else None
 
-        seeker_clauses = ["full_name LIKE ?", "phone LIKE ?", "region LIKE ?", "profession_title LIKE ?"]
-        seeker_params: list[Any] = [like, like, like, like]
+        seeker_clauses = ["full_name LIKE ?", "phone LIKE ?", "region LIKE ?", "district LIKE ?", "profession_title LIKE ?"]
+        seeker_params: list[Any] = [like, like, like, like, like]
         if numeric is not None:
             seeker_clauses.extend(["id = ?", "telegram_id = ?", "age = ?"])
             seeker_params.extend([numeric, numeric, numeric])
 
-        vacancy_clauses = ["organization LIKE ?", "full_name LIKE ?", "phone LIKE ?", "region LIKE ?", "profession_title LIKE ?"]
-        vacancy_params: list[Any] = [like, like, like, like, like]
+        vacancy_clauses = [
+            "organization LIKE ?",
+            "full_name LIKE ?",
+            "phone LIKE ?",
+            "region LIKE ?",
+            "district LIKE ?",
+            "profession_title LIKE ?",
+        ]
+        vacancy_params: list[Any] = [like, like, like, like, like, like]
         if numeric is not None:
             vacancy_clauses.extend(["id = ?", "employer_tg_id = ?"])
             vacancy_params.extend([numeric, numeric])
 
-        employer_clauses = ["full_name LIKE ?", "organization LIKE ?", "phone LIKE ?", "region LIKE ?"]
-        employer_params: list[Any] = [like, like, like, like]
+        employer_clauses = ["full_name LIKE ?", "organization LIKE ?", "phone LIKE ?", "region LIKE ?", "district LIKE ?"]
+        employer_params: list[Any] = [like, like, like, like, like]
         if numeric is not None:
             employer_clauses.extend(["id = ?", "telegram_id = ?"])
             employer_params.extend([numeric, numeric])

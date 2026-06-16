@@ -13,7 +13,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 PUBLIC_CHANNEL_ID = os.getenv("PUBLIC_CHANNEL_ID", "").strip()
 
 # Ishga arizalar (nomzodlar) yuboriladigan maxfiy kanal
-PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID", "").strip()
+PRIVATE_CHANNEL_ID = ("PRIVATE_CHANNEL_ID", "-1004372898211").strip()
 
 DATABASE_PATH = Path(os.getenv("DATABASE_PATH", "data/bot.sqlite3"))
 BACKUP_DIR = Path(os.getenv("BACKUP_DIR", "backups"))

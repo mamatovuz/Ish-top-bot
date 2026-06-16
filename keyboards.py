@@ -306,7 +306,7 @@ def seeker_edit_fields_keyboard() -> InlineKeyboardMarkup:
         ("📝 Word", "word_level"),
         ("🏢 Oldingi ish", "previous_job"),
         ("💸 Oldingi oylik", "previous_salary"),
-        ("💰 Hozirgi oylik", "current_salary"),
+        ("💰 Hozirgir kutayotgan oylik", "current_salary"),
         ("ℹ️ Qo'shimcha", "extra"),
     ]
     builder = InlineKeyboardBuilder()

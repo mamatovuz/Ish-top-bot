@@ -46,7 +46,7 @@ _DEFAULTS: dict[str, dict[str, Any]] = {
     "professions": {"title": None, "is_active": 1, "created_at": None},
     "seekers": {
         "telegram_id": None, "photo_id": None, "full_name": None, "age": None,
-        "gender": None, "phone": None, "region": None, "district": None,
+        "gender": None, "phone": None, "region": None, "district": None, "address": None,
         "birth_date": None, "profession_id": None, "profession_title": None,
         "job_type": None, "experience": None, "experience_years": None,
         "education": None, "excel_level": None, "word_level": None,
@@ -429,6 +429,7 @@ class Database:
             "phone": data["phone"],
             "region": data["region"],
             "district": data.get("district"),
+            "address": data.get("address"),
             "birth_date": data.get("birth_date"),
             "profession_id": data.get("profession_id"),
             "profession_title": data["profession_title"],
@@ -474,7 +475,7 @@ class Database:
 
     _SEEKER_EDITABLE = {
         "photo_id", "full_name", "age", "birth_date", "gender", "phone", "region",
-        "district", "profession_id", "profession_title", "job_type", "experience",
+        "district", "address", "profession_id", "profession_title", "job_type", "experience",
         "experience_years", "education", "excel_level", "word_level", "previous_job",
         "previous_salary", "previous_salary_amount", "current_salary",
         "current_salary_amount", "salary", "salary_amount", "extra",

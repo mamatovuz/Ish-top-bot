@@ -83,6 +83,7 @@ class SeekerForm(StatesGroup):
     phone = State()
     region = State()
     district = State()
+    address = State()
     profession = State()
     job_type = State()
     experience = State()
@@ -201,17 +202,21 @@ def is_valid_district(region: Any, district: Any) -> bool:
 def location_text(row: Any) -> str:
     region = clean_text(row_get(row, "region"), "")
     district = clean_text(row_get(row, "district"), "")
-    if region and district:
-        return f"{region}, {district}"
-    return region or district or "-"
+    address = clean_text(row_get(row, "address"), "")
+    base = f"{region}, {district}" if region and district else (region or district or "-")
+    if address:
+        return f"{base}, {address}"
+    return base
 
 
 def location_from_data(data: dict[str, Any]) -> str:
     region = clean_text(data.get("region"), "")
     district = clean_text(data.get("district"), "")
-    if region and district:
-        return f"{region}, {district}"
-    return region or district or "-"
+    address = clean_text(data.get("address"), "")
+    base = f"{region}, {district}" if region and district else (region or district or "-")
+    if address:
+        return f"{base}, {address}"
+    return base
 
 
 def parse_positive_int(text: str, *, minimum: int = 1, maximum: int = 1000) -> int | None:
@@ -896,6 +901,7 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
             "Telefon",
             "Hudud",
             "Tuman",
+            "Manzil",
             "Kasb",
             "Ish turi",
             "Tajriba",
@@ -926,6 +932,7 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
                 row_get(seeker, "phone"),
                 row_get(seeker, "region"),
                 row_get(seeker, "district"),
+                row_get(seeker, "address"),
                 row_get(seeker, "profession_title"),
                 row_get(seeker, "job_type"),
                 row_get(seeker, "experience"),
@@ -2352,6 +2359,7 @@ async def my_seeker_edit_field(callback: CallbackQuery, state: FSMContext) -> No
             "phone": "Yangi telefon raqamingizni qo'lda kiriting.\nMisol: <code>+998 90 123 45 67</code>",
             "region": "Yangi hududni tanlang.",
             "district": "Yangi tumanni tanlang.",
+            "address": "Yangi aniq manzilingizni kiriting.\nMasalan: <code>Imrat MFY, 5-uy</code>",
             "experience": "Yangi tajribangizni kiriting.",
             "education": "Yangi ma'lumot darajangizni kiriting.",
             "previous_job": "Yangi oldingi ish joyingizni kiriting.",
@@ -2673,6 +2681,25 @@ async def seeker_district(message: Message, state: FSMContext) -> None:
         await message.answer("Iltimos, tumanni tugmalardan tanlang.", reply_markup=districts_menu(region))
         return
     await state.update_data(district=district)
+    await state.set_state(SeekerForm.address)
+    await message.answer(
+        "🏠 Aniq manzilingizni kiriting.\n\n"
+        "Masalan: <code>Olmazor MFY, Bunyodkor ko'chasi 12</code>",
+        reply_markup=cancel_menu(),
+    )
+
+
+@router.message(SeekerForm.address)
+async def seeker_address(message: Message, state: FSMContext) -> None:
+    address = clean_text(message.text, "")
+    if not address:
+        await message.answer(
+            "Iltimos, aniq manzilingizni matn ko'rinishida yozing.\n"
+            "Masalan: <code>Imrat MFY, 5-uy</code>",
+            reply_markup=cancel_menu(),
+        )
+        return
+    await state.update_data(address=address)
     await state.set_state(SeekerForm.profession)
     await message.answer("Kasbingizni tanlang.", reply_markup=profession_keyboard(db.list_professions(), "seeker_prof"))
 

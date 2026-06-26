@@ -298,6 +298,7 @@ def seeker_edit_fields_keyboard() -> InlineKeyboardMarkup:
         ("📞 Telefon", "phone"),
         ("📍 Hudud", "region"),
         ("Tuman", "district"),
+        ("🏠 Manzil", "address"),
         ("💼 Kasb", "profession"),
         ("🧭 Ish turi", "job_type"),
         ("📈 Tajriba", "experience"),

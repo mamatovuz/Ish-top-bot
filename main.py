@@ -588,6 +588,17 @@ async def send_subscription_prompt(message: Message) -> None:
 
 class SubscriptionMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
+        # Bot faqat shaxsiy chatda (DM) ishlaydi.
+        # Guruh/superguruh/kanalda hech qanday xabar yoki tugmaga javob bermaydi
+        # (maxfiy guruh faqat arizalar joylash uchun ishlatiladi).
+        chat = None
+        if isinstance(event, Message):
+            chat = event.chat
+        elif isinstance(event, CallbackQuery):
+            chat = event.message.chat if event.message else None
+        if chat is not None and chat.type != "private":
+            return None
+
         user = getattr(event, "from_user", None)
         if not user or is_admin(user.id):
             return await handler(event, data)
@@ -611,11 +622,11 @@ class SubscriptionMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-async def publish_seeker(bot: Bot, seeker: Any) -> None:
-    """Nomzodni MAXFIY kanalga yuboradi."""
+async def publish_seeker(bot: Bot, seeker: Any) -> str | None:
+    """Nomzodni MAXFIY kanalga yuboradi. Muvaffaqiyatli bo'lsa None, aks holda xato matnini qaytaradi."""
     channel_id = seeker_channel_id()
     if not channel_id:
-        return
+        return "🔒 Maxfiy kanal o'rnatilmagan. Admin panel → 📡 E'lon sozlamalari orqali kanalni qo'shing."
     try:
         caption = public_seeker_card(seeker)
         message_id = row_get(seeker, "channel_message_id", None)
@@ -641,15 +652,17 @@ async def publish_seeker(bot: Bot, seeker: Any) -> None:
                 document=row_get(seeker, "resume_file_id"),
                 caption=f"📎 Nomzod #{row_get(seeker, 'id')} rezyumesi",
             )
+        return None
     except Exception as exc:
         logger.warning("Failed to publish seeker: %s", exc)
+        return f"{type(exc).__name__}: {exc}"
 
 
-async def publish_vacancy(bot: Bot, vacancy: Any) -> None:
-    """Vakansiyani OCHIQ kanalga yuboradi."""
+async def publish_vacancy(bot: Bot, vacancy: Any) -> str | None:
+    """Vakansiyani OCHIQ kanalga yuboradi. Muvaffaqiyatli bo'lsa None, aks holda xato matnini qaytaradi."""
     channel_id = vacancy_channel_id()
     if not channel_id:
-        return
+        return "📢 Ochiq kanal o'rnatilmagan. Admin panel → 📡 E'lon sozlamalari orqali kanalni qo'shing."
     try:
         text = public_vacancy_card(vacancy)
         message_id = row_get(vacancy, "channel_message_id", None)
@@ -669,8 +682,10 @@ async def publish_vacancy(bot: Bot, vacancy: Any) -> None:
         else:
             sent = await bot.send_message(chat_id=channel_id, text=text)
             db.mark_vacancy_published(int(row_get(vacancy, "id")), str(channel_id), sent.message_id)
+        return None
     except Exception as exc:
         logger.warning("Failed to publish vacancy: %s", exc)
+        return f"{type(exc).__name__}: {exc}"
 
 
 async def send_to_admins(bot: Bot, text: str, **kwargs) -> None:
@@ -1607,14 +1622,23 @@ async def admin_moderate_seeker(callback: CallbackQuery, state: FSMContext, bot:
         db.add_admin_log(callback.from_user.id, "approve_seeker", "seeker", seeker_id)
         seeker = db.get_seeker(seeker_id)
         await cleanup_moderation_requests(bot, "seeker", seeker_id, callback.from_user.id, callback.message)
-        await publish_seeker(bot, seeker)
+        publish_error = await publish_seeker(bot, seeker)
         await bot.send_message(
             int(row_get(seeker, "telegram_id")),
             "✅ Arizangiz admin tomonidan tasdiqlandi.\n\nEndi mos vakansiyalar sizga yuboriladi.",
             reply_markup=menu_for(int(row_get(seeker, "telegram_id"))),
         )
         await send_matched_vacancies_to_seeker(bot, seeker)
-        await callback.message.answer("✅ Ariza tasdiqlandi va maxfiy kanalga yuborildi.")
+        if publish_error:
+            await callback.message.answer(
+                "✅ Ariza tasdiqlandi.\n"
+                "⚠️ Lekin maxfiy kanalga <b>yuborilmadi</b>:\n"
+                f"<code>{esc(publish_error)}</code>\n\n"
+                "Tekshiring: kanal ID to'g'rimi va bot o'sha kanalda <b>admin</b>mi "
+                "(Admin panel → 📡 E'lon sozlamalari → 🧪 Kanallarni tekshirish)."
+            )
+        else:
+            await callback.message.answer("✅ Ariza tasdiqlandi va maxfiy kanalga yuborildi.")
     else:
         await cleanup_moderation_requests(bot, "seeker", seeker_id, callback.from_user.id, callback.message)
         await state.set_state(AdminModerationReason.seeker_reason)
@@ -1654,7 +1678,7 @@ async def admin_moderate_vacancy(callback: CallbackQuery, state: FSMContext, bot
         db.add_admin_log(callback.from_user.id, "approve_vacancy", "vacancy", vacancy_id)
         vacancy = db.get_vacancy(vacancy_id)
         await cleanup_moderation_requests(bot, "vacancy", vacancy_id, callback.from_user.id, callback.message)
-        await publish_vacancy(bot, vacancy)
+        publish_error = await publish_vacancy(bot, vacancy)
         await bot.send_message(
             int(row_get(vacancy, "employer_tg_id")),
             "✅ Vakansiyangiz admin tomonidan tasdiqlandi.\n\nMos nomzodlar avtomatik yuboriladi.",
@@ -1662,7 +1686,16 @@ async def admin_moderate_vacancy(callback: CallbackQuery, state: FSMContext, bot
         )
         await send_matches_to_employer(bot, vacancy)
         await notify_seekers_about_new_vacancy(bot, vacancy)
-        await callback.message.answer("✅ Vakansiya tasdiqlandi va ochiq kanalga yuborildi.")
+        if publish_error:
+            await callback.message.answer(
+                "✅ Vakansiya tasdiqlandi.\n"
+                "⚠️ Lekin ochiq kanalga <b>yuborilmadi</b>:\n"
+                f"<code>{esc(publish_error)}</code>\n\n"
+                "Tekshiring: kanal ID to'g'rimi va bot o'sha kanalda <b>admin</b>mi "
+                "(Admin panel → 📡 E'lon sozlamalari → 🧪 Kanallarni tekshirish)."
+            )
+        else:
+            await callback.message.answer("✅ Vakansiya tasdiqlandi va ochiq kanalga yuborildi.")
     else:
         await cleanup_moderation_requests(bot, "vacancy", vacancy_id, callback.from_user.id, callback.message)
         await state.set_state(AdminModerationReason.vacancy_reason)

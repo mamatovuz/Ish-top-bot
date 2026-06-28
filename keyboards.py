@@ -119,11 +119,13 @@ def subscription_keyboard(channels) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def profession_keyboard(professions, prefix: str) -> InlineKeyboardMarkup:
+def profession_keyboard(professions, prefix: str, include_other: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for profession in professions:
         builder.button(text=profession["title"], callback_data=f"{prefix}:{profession['id']}")
     builder.adjust(2)
+    if include_other:
+        builder.row(InlineKeyboardButton(text="➕ Boshqa yo'nalish", callback_data=f"{prefix}:other"))
     return builder.as_markup()
 
 

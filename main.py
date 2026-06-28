@@ -85,6 +85,7 @@ class SeekerForm(StatesGroup):
     district = State()
     address = State()
     profession = State()
+    profession_other = State()
     job_type = State()
     experience = State()
     education = State()
@@ -105,6 +106,7 @@ class VacancyForm(StatesGroup):
     region = State()
     district = State()
     profession = State()
+    profession_other = State()
     staff_count = State()
     job_type = State()
     salary = State()
@@ -412,6 +414,15 @@ def seeker_card(seeker: Any, *, hide_phone: bool = True) -> str:
     )
 
 
+def gender_hashtag(value: Any) -> str:
+    gender = clean_text(value, "")
+    if gender == "Erkak":
+        return "#erkak"
+    if gender == "Ayol":
+        return "#ayol"
+    return ""
+
+
 def public_seeker_card(seeker: Any) -> str:
     resume = "bor" if row_get(seeker, "resume_file_id") else "yo'q"
     birth = row_get(seeker, "birth_date", "-")
@@ -419,6 +430,8 @@ def public_seeker_card(seeker: Any) -> str:
     birth_line = f"{esc(birth)}"
     if age:
         birth_line += f" ({esc(age)} yosh)"
+    tag = gender_hashtag(row_get(seeker, "gender"))
+    tag_line = f"\n\n{tag}" if tag else ""
     return (
         f"🆕 <b>Ish qidiruvchi</b>\n"
         f"━━━━━━━━━━━━━━\n\n"
@@ -438,6 +451,7 @@ def public_seeker_card(seeker: Any) -> str:
         f"📞 Aloqa: {esc(row_get(seeker, 'phone'))}\n"
         f"📎 Rezyume: {esc(resume)}\n\n"
         f"ℹ️ Qo'shimcha: {esc(row_get(seeker, 'extra', 'Yoq'))}"
+        f"{tag_line}"
     )
 
 
@@ -2701,12 +2715,24 @@ async def seeker_address(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(address=address)
     await state.set_state(SeekerForm.profession)
-    await message.answer("Kasbingizni tanlang.", reply_markup=profession_keyboard(db.list_professions(), "seeker_prof"))
+    await message.answer(
+        "Kasbingizni tanlang.",
+        reply_markup=profession_keyboard(db.list_professions(), "seeker_prof", include_other=True),
+    )
 
 
 @router.callback_query(SeekerForm.profession, F.data.startswith("seeker_prof:"))
 async def seeker_profession(callback: CallbackQuery, state: FSMContext) -> None:
-    profession_id = int(callback.data.split(":")[1])
+    raw = callback.data.split(":")[1]
+    if raw == "other":
+        await state.set_state(SeekerForm.profession_other)
+        await callback.message.answer(
+            "✍️ O'z yo'nalishingizni yozing.\nMasalan: <code>SMM menejer</code>",
+            reply_markup=cancel_menu(),
+        )
+        await callback.answer()
+        return
+    profession_id = int(raw)
     profession = db.get_profession(profession_id)
     if not profession:
         await callback.answer("Kasb topilmadi.", show_alert=True)
@@ -2715,6 +2741,17 @@ async def seeker_profession(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SeekerForm.job_type)
     await callback.message.answer("Qaysi ish turi sizga ma'qul?", reply_markup=seeker_job_type_keyboard())
     await callback.answer()
+
+
+@router.message(SeekerForm.profession_other)
+async def seeker_profession_other(message: Message, state: FSMContext) -> None:
+    title = clean_text(message.text, "")
+    if not title:
+        await message.answer("Iltimos, yo'nalish nomini yozing.", reply_markup=cancel_menu())
+        return
+    await state.update_data(profession_id=None, profession_title=title)
+    await state.set_state(SeekerForm.job_type)
+    await message.answer("Qaysi ish turi sizga ma'qul?", reply_markup=seeker_job_type_keyboard())
 
 
 @router.callback_query(SeekerForm.job_type, F.data.startswith("seeker_job_type:"))
@@ -2936,12 +2973,24 @@ async def vacancy_district(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(district=district)
     await state.set_state(VacancyForm.profession)
-    await message.answer("Kerakli mutaxassislikni tanlang.", reply_markup=profession_keyboard(db.list_professions(), "vac_prof"))
+    await message.answer(
+        "Kerakli mutaxassislikni tanlang.",
+        reply_markup=profession_keyboard(db.list_professions(), "vac_prof", include_other=True),
+    )
 
 
 @router.callback_query(VacancyForm.profession, F.data.startswith("vac_prof:"))
 async def vacancy_profession(callback: CallbackQuery, state: FSMContext) -> None:
-    profession_id = int(callback.data.split(":")[1])
+    raw = callback.data.split(":")[1]
+    if raw == "other":
+        await state.set_state(VacancyForm.profession_other)
+        await callback.message.answer(
+            "✍️ Kerakli yo'nalishni yozing.\nMasalan: <code>SMM menejer</code>",
+            reply_markup=cancel_menu(),
+        )
+        await callback.answer()
+        return
+    profession_id = int(raw)
     profession = db.get_profession(profession_id)
     if not profession:
         await callback.answer("Kasb topilmadi.", show_alert=True)
@@ -2950,6 +2999,17 @@ async def vacancy_profession(callback: CallbackQuery, state: FSMContext) -> None
     await state.set_state(VacancyForm.staff_count)
     await callback.message.answer("Nechta xodim kerak?\nMisol: 5", reply_markup=cancel_menu())
     await callback.answer()
+
+
+@router.message(VacancyForm.profession_other)
+async def vacancy_profession_other(message: Message, state: FSMContext) -> None:
+    title = clean_text(message.text, "")
+    if not title:
+        await message.answer("Iltimos, yo'nalish nomini yozing.", reply_markup=cancel_menu())
+        return
+    await state.update_data(profession_id=None, profession_title=title)
+    await state.set_state(VacancyForm.staff_count)
+    await message.answer("Nechta xodim kerak?\nMisol: 5", reply_markup=cancel_menu())
 
 
 @router.message(VacancyForm.staff_count)

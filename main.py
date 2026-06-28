@@ -630,15 +630,17 @@ async def publish_seeker(bot: Bot, seeker: Any) -> str | None:
     try:
         caption = public_seeker_card(seeker)
         message_id = row_get(seeker, "channel_message_id", None)
-        chat_id = row_get(seeker, "channel_chat_id", None) or channel_id
-        if message_id:
+        chat_id = row_get(seeker, "channel_chat_id", None)
+        # Mavjud postni faqat u JORIY maxfiy kanalda bo'lsa tahrirlaymiz.
+        # Kanal o'zgargan bo'lsa (eski guruh ID si saqlangan), yangi kanalga yangi post yuboramiz.
+        if message_id and str(chat_id) == str(channel_id):
             try:
                 await bot.edit_message_caption(
-                    chat_id=chat_id,
+                    chat_id=channel_id,
                     message_id=int(message_id),
                     caption=caption,
                 )
-                db.mark_seeker_published(int(row_get(seeker, "id")), str(chat_id), int(message_id))
+                db.mark_seeker_published(int(row_get(seeker, "id")), str(channel_id), int(message_id))
             except Exception as exc:
                 logger.warning("Failed to edit seeker post, sending new: %s", exc)
                 sent = await bot.send_photo(chat_id=channel_id, photo=row_get(seeker, "photo_id"), caption=caption)
@@ -666,15 +668,16 @@ async def publish_vacancy(bot: Bot, vacancy: Any) -> str | None:
     try:
         text = public_vacancy_card(vacancy)
         message_id = row_get(vacancy, "channel_message_id", None)
-        chat_id = row_get(vacancy, "channel_chat_id", None) or channel_id
-        if message_id:
+        chat_id = row_get(vacancy, "channel_chat_id", None)
+        # Mavjud postni faqat u JORIY ochiq kanalda bo'lsa tahrirlaymiz.
+        if message_id and str(chat_id) == str(channel_id):
             try:
                 await bot.edit_message_text(
-                    chat_id=chat_id,
+                    chat_id=channel_id,
                     message_id=int(message_id),
                     text=text,
                 )
-                db.mark_vacancy_published(int(row_get(vacancy, "id")), str(chat_id), int(message_id))
+                db.mark_vacancy_published(int(row_get(vacancy, "id")), str(channel_id), int(message_id))
             except Exception as exc:
                 logger.warning("Failed to edit vacancy post, sending new: %s", exc)
                 sent = await bot.send_message(chat_id=channel_id, text=text)

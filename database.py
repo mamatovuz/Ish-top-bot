@@ -178,7 +178,9 @@ class Database:
                 application_id INTEGER NOT NULL,
                 candidate_id INTEGER NOT NULL,
                 telegram_id INTEGER NOT NULL,
-                vacancy_id INTEGER NOT NULL,
+                vacancy_id INTEGER,
+                profession_id INTEGER,
+                test_source TEXT,
                 test_id INTEGER NOT NULL,
                 test_title TEXT,
                 assignment_id INTEGER,
@@ -187,7 +189,7 @@ class Database:
                 correct_answers INTEGER,
                 wrong_answers INTEGER,
                 score INTEGER,
-                percentage INTEGER,
+                percentage REAL,
                 result_status TEXT,
                 sync_status TEXT NOT NULL DEFAULT 'sync_pending',
                 sync_error TEXT,
@@ -197,8 +199,7 @@ class Database:
                 started_at TEXT,
                 completed_at TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE
+                updated_at TEXT NOT NULL
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_application_tests_assignment
@@ -256,6 +257,69 @@ class Database:
         if column not in self._columns(table):
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    def _relax_application_tests_vacancy(self) -> None:
+        """application_tests.vacancy_id NOT NULL bo'lsa — nullable qilib qayta quradi
+        (ma'lumotlarni saqlagan holda). Idempotent: bir marta ishlaydi."""
+        info = self.conn.execute("PRAGMA table_info(application_tests)").fetchall()
+        if not info:
+            return
+        vac = next((c for c in info if c["name"] == "vacancy_id"), None)
+        if vac is None or int(vac["notnull"]) == 0:
+            return  # allaqachon nullable — hech narsa qilinmaydi
+        cols = [c["name"] for c in info]
+        col_csv = ", ".join(cols)
+        self.conn.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            CREATE TABLE application_tests__new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL,
+                candidate_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                vacancy_id INTEGER,
+                profession_id INTEGER,
+                test_source TEXT,
+                test_id INTEGER NOT NULL,
+                test_title TEXT,
+                assignment_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'assigned',
+                total_questions INTEGER,
+                correct_answers INTEGER,
+                wrong_answers INTEGER,
+                score INTEGER,
+                percentage REAL,
+                result_status TEXT,
+                sync_status TEXT NOT NULL DEFAULT 'sync_pending',
+                sync_error TEXT,
+                sync_attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                assigned_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            """
+        )
+        self.conn.execute(
+            f"INSERT INTO application_tests__new ({col_csv}) SELECT {col_csv} FROM application_tests"
+        )
+        self.conn.executescript(
+            """
+            DROP TABLE application_tests;
+            ALTER TABLE application_tests__new RENAME TO application_tests;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_application_tests_assignment
+                ON application_tests(assignment_id) WHERE assignment_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_application_tests_application
+                ON application_tests(application_id);
+            CREATE INDEX IF NOT EXISTS idx_application_tests_candidate
+                ON application_tests(candidate_id);
+            CREATE INDEX IF NOT EXISTS idx_application_tests_sync
+                ON application_tests(sync_status);
+            PRAGMA foreign_keys = ON;
+            """
+        )
+
     def _migrate_schema(self) -> None:
         self._add_column_if_missing("seekers", "resume_file_id", "TEXT")
         self._add_column_if_missing("seekers", "resume_file_name", "TEXT")
@@ -296,6 +360,17 @@ class Database:
         self._add_column_if_missing("vacancies", "test_required", "INTEGER NOT NULL DEFAULT 0")
 
         self._add_column_if_missing("employers", "district", "TEXT")
+
+        # Kasbga (profession) test biriktirish
+        self._add_column_if_missing("professions", "test_id", "INTEGER")
+        self._add_column_if_missing("professions", "test_title", "TEXT")
+
+        # application_tests: yangi ustunlar (kasb-asosli/umumiy test uchun)
+        self._add_column_if_missing("application_tests", "profession_id", "INTEGER")
+        self._add_column_if_missing("application_tests", "test_source", "TEXT")
+        # Eski sxemada vacancy_id NOT NULL + FK bo'lgan — kasb-asosli testlar
+        # vakansiyasiz bo'lgani uchun uni nullable qilib qayta quramiz (ma'lumot saqlanadi).
+        self._relax_application_tests_vacancy()
 
         if self.get_setting("migration_moderation_v1", "0") != "1":
             self.conn.execute("UPDATE seekers SET moderation_status = 'approved', approved_at = COALESCE(approved_at, updated_at)")
@@ -1227,8 +1302,10 @@ class Database:
         application_id: int,
         candidate_id: int,
         telegram_id: int,
-        vacancy_id: int,
         test_id: int,
+        vacancy_id: int | None = None,
+        profession_id: int | None = None,
+        test_source: str | None = None,
         test_title: str | None = None,
         assignment_id: int | None = None,
         status: str = "assigned",
@@ -1239,16 +1316,19 @@ class Database:
         cur = self.conn.execute(
             """
             INSERT INTO application_tests(
-                application_id, candidate_id, telegram_id, vacancy_id, test_id, test_title,
+                application_id, candidate_id, telegram_id, vacancy_id, profession_id,
+                test_source, test_id, test_title,
                 assignment_id, status, sync_status, assigned_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 application_id,
                 candidate_id,
                 telegram_id,
                 vacancy_id,
+                profession_id,
+                test_source,
                 test_id,
                 test_title,
                 assignment_id,
@@ -1261,6 +1341,48 @@ class Database:
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    # ── Kasb (profession) / umumiy test biriktirish ─────────────────────────
+
+    def set_profession_test(
+        self, profession_id: int, test_id: int | None, test_title: str | None = None
+    ) -> None:
+        """Kasbga test biriktirish yoki olib tashlash (test_id=None)."""
+        self.conn.execute(
+            "UPDATE professions SET test_id = ?, test_title = ? WHERE id = ?",
+            (test_id, test_title, profession_id),
+        )
+        self.conn.commit()
+
+    def set_final_test(self, test_id: int | None, test_title: str | None = None) -> None:
+        """Umumiy (yakuniy) fallback testni sozlash."""
+        self.set_setting("final_test_id", str(test_id) if test_id else "")
+        self.set_setting("final_test_title", test_title or "")
+
+    def get_final_test(self) -> tuple[int | None, str]:
+        raw = self.get_setting("final_test_id", "")
+        title = self.get_setting("final_test_title", "")
+        return (int(raw) if raw.isdigit() else None, title)
+
+    def resolve_test_for_profession(
+        self, profession_id: int | None
+    ) -> tuple[int | None, str, str | None]:
+        """Kasb bo'yicha testni aniqlaydi.
+
+        Qaytadi: (test_id, test_title, source) — source: 'profession' | 'final' | None.
+        Avval kasbga biriktirilgan test, bo'lmasa umumiy yakuniy test.
+        """
+        if profession_id is not None:
+            prof = self.get_profession(profession_id)
+            if prof is not None:
+                pid = prof["test_id"] if "test_id" in prof.keys() else None
+                if pid:
+                    ptitle = prof["test_title"] if "test_title" in prof.keys() else None
+                    return (int(pid), ptitle or "Test", "profession")
+        final_id, final_title = self.get_final_test()
+        if final_id:
+            return (final_id, final_title or "Test", "final")
+        return (None, "", None)
 
     def get_application_test(self, row_id: int) -> sqlite3.Row | None:
         return self.conn.execute(

@@ -41,6 +41,9 @@ RESULT_API_PORT = int(os.getenv("RESULT_API_PORT", os.getenv("PORT", "8080")) or
 # DoriKent API so'rovlari uchun timeout (soniya)
 DORIKENT_TEST_API_TIMEOUT = float(os.getenv("DORIKENT_TEST_API_TIMEOUT", "15") or "15")
 
+# Test natijalari e'lon qilinadigan kanal (bo'sh bo'lsa — maxfiy kanalga tushadi)
+TEST_RESULT_CHANNEL_ID = os.getenv("TEST_RESULT_CHANNEL_ID", "").strip() or PRIVATE_CHANNEL_ID
+
 
 def dorikent_integration_enabled() -> bool:
     """Test integratsiyasi to'liq sozlanganmi (URL + secret bor)."""

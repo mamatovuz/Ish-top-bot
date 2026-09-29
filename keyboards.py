@@ -95,7 +95,8 @@ def admin_menu() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📊 Dashboard"), KeyboardButton(text="🔐 Majburiy obuna")],
             [KeyboardButton(text="🛂 Moderatsiya"), KeyboardButton(text="👑 Adminlar")],
-            [KeyboardButton(text="🧰 Kasblar"), KeyboardButton(text="📣 Ommaviy xabar")],
+            [KeyboardButton(text="🧰 Kasblar"), KeyboardButton(text="📝 Testlar")],
+            [KeyboardButton(text="📣 Ommaviy xabar")],
             [KeyboardButton(text="👥 Nomzodlar"), KeyboardButton(text="🏢 Vakansiyalar")],
             [KeyboardButton(text="🔎 Qidiruv"), KeyboardButton(text="📤 Excel eksport")],
             [KeyboardButton(text="📡 E'lon sozlamalari"), KeyboardButton(text="💾 Backup")],
@@ -470,9 +471,43 @@ def vacancy_edit_fields_keyboard(vacancy_id: int) -> InlineKeyboardMarkup:
     for title, field in fields:
         builder.button(text=title, callback_data=f"vac_edit:{vacancy_id}:{field}")
     builder.adjust(2)
-    builder.row(
-        InlineKeyboardButton(text="📝 Test biriktirish", callback_data=f"vac_test:menu:{vacancy_id}")
-    )
+    return builder.as_markup()
+
+
+def admin_tests_keyboard(professions, final_title: str | None) -> InlineKeyboardMarkup:
+    """Admin 'Testlar' bo'limi: umumiy yakuniy test + har bir kasb uchun test."""
+    builder = InlineKeyboardBuilder()
+    ft = final_title or "— biriktirilmagan"
+    builder.button(text=f"🌐 Yakuniy (umumiy) test: {ft}", callback_data="stlist:final")
+    for prof in professions:
+        title = prof["title"]
+        ptest = None
+        try:
+            ptest = prof["test_title"]
+        except (KeyError, IndexError):
+            ptest = None
+        label = f"💼 {title}: {ptest}" if ptest else f"💼 {title}: —"
+        builder.button(text=label, callback_data=f"stlist:prof:{prof['id']}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def test_pick_keyboard(tests, target: str, current_id=None) -> InlineKeyboardMarkup:
+    """DoriKent testlaridan birini tanlash. target: 'final' yoki 'prof:<id>'.
+
+    Callback: stpick:<target>:<test_id>  (test_id=0 → biriktirishni olib tashlash).
+    """
+    builder = InlineKeyboardBuilder()
+    for test in tests:
+        count = test.get("questions_count") or 0
+        mark = "✅ " if current_id is not None and int(test["id"]) == int(current_id) else ""
+        builder.button(
+            text=f"{mark}{test['title']} — {count} savol",
+            callback_data=f"stpick:{target}:{test['id']}",
+        )
+    builder.button(text="🗑 Testni olib tashlash", callback_data=f"stpick:{target}:0")
+    builder.button(text="♻️ Yangilash", callback_data=f"stlist:{target}")
+    builder.adjust(1)
     return builder.as_markup()
 
 

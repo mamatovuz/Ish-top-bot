@@ -38,7 +38,7 @@ class TestResultPayload(BaseModel):
     assignment_id: int
     candidate_id: int
     telegram_id: int
-    vacancy_id: int
+    vacancy_id: Optional[int] = None   # kasb-asosli testlarda vakansiya bo'lmaydi
     test_id: int
     external_application_id: int
     total_questions: int = Field(ge=0)
@@ -122,7 +122,12 @@ def create_app(
         mismatches: list[str] = []
         if int(row["candidate_id"]) != payload.candidate_id:
             mismatches.append("candidate_id")
-        if int(row["vacancy_id"]) != payload.vacancy_id:
+        # vacancy_id ixtiyoriy — faqat ikkala tomonda ham bo'lsa solishtiramiz.
+        if (
+            payload.vacancy_id is not None
+            and row["vacancy_id"] is not None
+            and int(row["vacancy_id"]) != payload.vacancy_id
+        ):
             mismatches.append("vacancy_id")
         if int(row["test_id"]) != payload.test_id:
             mismatches.append("test_id")

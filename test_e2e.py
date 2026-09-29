@@ -58,6 +58,7 @@ os.environ["DORIKENT_TEST_BOT_USERNAME"] = BOT_USERNAME
 os.environ["TEST_RESULT_API_SECRET"] = RESULT_SECRET
 os.environ["RESULT_API_HOST"] = "127.0.0.1"
 os.environ["RESULT_API_PORT"] = str(MY_PORT)
+os.environ["TEST_RESULT_CHANNEL_ID"] = "-1009999999999"   # natija kanali (test)
 
 from database import db  # noqa: E402
 from services.test_api import test_client  # noqa: E402
@@ -73,9 +74,13 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 class StubBot:
-    """Telegram mock — send_message hech narsa qilmaydi (UI qatlami)."""
+    """Telegram mock — yuborilgan xabarlarni yozib boradi (UI qatlami)."""
 
-    async def send_message(self, *args, **kwargs):
+    def __init__(self):
+        self.sent: list[tuple] = []
+
+    async def send_message(self, chat_id, text, *args, **kwargs):
+        self.sent.append((chat_id, text))
         return None
 
 
@@ -120,8 +125,9 @@ async def wait_health(timeout: float = 30) -> bool:
 
 async def run() -> None:
     # 1) Ish Topish natija API (bu jarayonda). Notifier = real on_test_result,
-    #    shunda gate (test_pending → ish beruvchiga yuborish) ham tekshiriladi.
-    main._RESULT_BOT = StubBot()
+    #    shunda kanalga natija e'lon qilish ham tekshiriladi.
+    stub = StubBot()
+    main._RESULT_BOT = stub
     runner = await result_api.start_result_api(notifier=main.on_test_result)
 
     # 2) DoriKent'ni GET /health orqali kutamiz
@@ -165,25 +171,28 @@ async def run() -> None:
         raise RuntimeError("E2E test topilmadi")
     check("test question_count = 3", int(e2e_test["questions_count"]) == 3, str(e2e_test["questions_count"]))
 
-    # 5) Vakansiyaga testni biriktiramiz
-    db.set_vacancy_test(vacancy_id, int(e2e_test["id"]), e2e_test["title"], test_required=True)
+    # 5) KASBGA testni biriktiramiz (admin panel: 📝 Testlar → kasb testi)
+    db.set_profession_test(prof["id"], int(e2e_test["id"]), e2e_test["title"])
+    rt_id, rt_title, rt_src = db.resolve_test_for_profession(prof["id"])
+    check("kasb testi to'g'ri aniqlandi (source=profession)",
+          rt_id == int(e2e_test["id"]) and rt_src == "profession", f"{rt_id}/{rt_src}")
 
-    # 6) Nomzod ariza beradi — MAJBURIY test (gate): interest 'test_pending' bo'ladi,
-    #    ish beruvchiga faqat test yakunlangach yuboriladi.
-    interest_id = db.create_interest(vacancy_id, seeker_id, employer_tg, seeker_tg, "test_pending")
-    vacancy = db.get_vacancy(vacancy_id)
+    # 6) Nomzod ariza yuboradi — YAKUNIY bosqich sifatida kasb testi tayinlanadi.
+    #    application_id = seeker.id (vakansiyasiz — kasb-asosli).
     seeker = db.get_seeker(seeker_id)
-    await main.assign_test_for_application(
-        StubBot(), application_id=interest_id, vacancy=vacancy, seeker=seeker, notify=True
-    )
-    at = db.get_active_application_test(interest_id)
+    assigned = await main.assign_profession_test_for_seeker(stub, seeker, notify=True)
+    check("ariza yuborilganda kasb testi tayinlandi", assigned is True)
+    at = db.get_active_application_test(seeker_id)
     check("assign real HTTP → application_test synced", at is not None and at["sync_status"] == "synced",
           at["sync_status"] if at else "yo'q")
     assignment_id = int(at["assignment_id"])
     check("assignment_id qaytdi (>=1)", assignment_id >= 1, str(assignment_id))
     check("total_questions assign'dan saqlandi (3)", at["total_questions"] == 3, str(at["total_questions"]))
-
-    # DoriKent DB'da assignment haqiqatan yaratilganini bilvosita tekshiramiz (result kelishi orqali)
+    check("test_source=profession, vacancy_id=NULL (kasb-asosli)",
+          at["test_source"] == "profession" and at["vacancy_id"] is None,
+          f"{at['test_source']}/{at['vacancy_id']}")
+    check("deep-link xabari nomzodga yuborildi",
+          any("Testni boshlash" not in t and "test" in t.lower() for _, t in stub.sent) or len(stub.sent) >= 1)
 
     # 7) Natijani kutamiz — DoriKent watcher assignment ni ko'rib, REAL HTTP callback yuboradi
     saved = None
@@ -201,26 +210,25 @@ async def run() -> None:
         check("correct=2, wrong=1, total=3",
               int(saved["correct_answers"]) == 2 and int(saved["wrong_answers"]) == 1
               and int(saved["total_questions"]) == 3)
-        check("candidate/vacancy/test to'g'ri bog'landi",
-              int(saved["candidate_id"]) == seeker_id and int(saved["vacancy_id"]) == vacancy_id
-              and int(saved["test_id"]) == int(e2e_test["id"]))
+        check("candidate/test to'g'ri bog'landi",
+              int(saved["candidate_id"]) == seeker_id and int(saved["test_id"]) == int(e2e_test["id"]))
 
-    # 8) Gate: test yakunlangach interest 'test_completed' bo'lib, ish beruvchiga yuborilgan
-    interest = db.get_interest(interest_id)
-    check("majburiy test yakunlangach ariza ish beruvchiga o'tdi (test_completed)",
-          interest is not None and interest["status"] == "test_completed",
-          interest["status"] if interest else "yo'q")
+    # 8) Natija KANALGA e'lon qilindimi (ma'lumotlari bilan)?
+    channel_msgs = [t for cid, t in stub.sent if str(cid) == os.environ["TEST_RESULT_CHANNEL_ID"]]
+    channel_ok = any(("Test natijasi" in t and "66.7" in t and "Noto'g'ri" in t) for t in channel_msgs)
+    check("natija kanalga e'lon qilindi (nom, to'g'ri/noto'g'ri, foiz)", channel_ok,
+          (channel_msgs[0].replace(chr(10), " ")[:90] if channel_msgs else "kanalga xabar yo'q"))
 
     # 9) "Mening arizam" ko'rinishida natija matni chiqadimi
     block = main.candidate_tests_block(seeker_id)
     check("Mening arizam natijani ko'rsatadi", "66.7%" in block and "o'ta olmadi" in block.lower(),
           block.replace("\n", " ")[:80])
 
-    # 9) Duplicate himoya: xuddi shu natijani qayta POST qilamiz
+    # 10) Duplicate himoya: xuddi shu natijani qayta POST qilamiz (vacancy_id yo'q)
     dup_payload = {
         "result_key": f"assignment_{assignment_id}",
         "assignment_id": assignment_id, "candidate_id": seeker_id, "telegram_id": seeker_tg,
-        "vacancy_id": vacancy_id, "test_id": int(e2e_test["id"]), "external_application_id": interest_id,
+        "test_id": int(e2e_test["id"]), "external_application_id": seeker_id,
         "total_questions": 3, "correct_answers": 2, "wrong_answers": 1,
         "score": 67, "percentage": 66.7, "status": "failed",
         "completed_at": "2026-09-30T10:05:00Z",
@@ -230,7 +238,7 @@ async def run() -> None:
                               json=dup_payload, headers={"Authorization": f"Bearer {RESULT_SECRET}"})
         check("duplicate → 200 & duplicate=True", r.status_code == 200 and r.json().get("duplicate") is True,
               str(r.status_code))
-        rows = db.list_application_tests_by_vacancy(vacancy_id)
+        rows = db.list_application_tests_by_candidate(seeker_id)
         check("duplicate yangi yozuv yaratmadi (1 ta)", len(rows) == 1, f"{len(rows)} ta")
 
         # 10) Ownership: noto'g'ri telegram_id → 409

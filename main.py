@@ -1187,6 +1187,44 @@ async def on_test_result(saved_row: dict[str, Any], payload: dict[str, Any]) -> 
     except Exception as exc:  # noqa: BLE001
         logger.warning("Nomzodga natija xabarini yuborib bo'lmadi: %s", exc)
 
+    # Majburiy test (gate) yakunlandi — endi arizani ish beruvchiga natija bilan yuboramiz.
+    await _forward_gated_application_to_employer(payload, status)
+
+
+async def _forward_gated_application_to_employer(payload: dict[str, Any], status: str) -> None:
+    """Agar ariza 'test_pending' (majburiy test kutayotgan) bo'lsa, test yakunlangach
+    uni ish beruvchiga test natijasi bilan yuboradi."""
+    interest_id = payload.get("external_application_id")
+    if not interest_id or _RESULT_BOT is None:
+        return
+    interest = db.get_interest(int(interest_id))
+    if not interest or clean_text(row_get(interest, "status"), "") != "test_pending":
+        return  # gate emas yoki allaqachon yuborilgan
+    vacancy = db.get_vacancy(int(payload["vacancy_id"]))
+    seeker = db.get_seeker(int(payload["candidate_id"]))
+    if not vacancy or not seeker:
+        return
+    db.update_interest_status(int(interest_id), "test_completed")
+
+    passed = status in ("passed", "pass", "true", "1")
+    result_line = (
+        f"{test_result_status_text('passed' if passed else 'failed')} — "
+        f"{fmt_percent(payload.get('percentage'))}% "
+        f"({esc(payload.get('correct_answers'))}/{esc(payload.get('total_questions'))})"
+    )
+    try:
+        await _RESULT_BOT.send_message(
+            int(row_get(vacancy, "employer_tg_id")),
+            "📩 <b>Nomzod vakansiyangizga ariza berdi va testni yakunladi</b>\n\n"
+            f"🎯 Moslik: {match_score(seeker, vacancy)}%\n"
+            f"📝 Test: {esc(row_get(vacancy, 'test_title', 'Test'))}\n"
+            f"🎯 Test natijasi: {result_line}\n\n"
+            + seeker_match_card(seeker),
+            reply_markup=employer_candidate_request_keyboard(int(interest_id)),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Ish beruvchiga ariza yuborib bo'lmadi (interest=%s): %s", interest_id, exc)
+
 
 # Natija notifier uchun bot nusxasi (main() da o'rnatiladi)
 _RESULT_BOT: Bot | None = None
@@ -2770,13 +2808,17 @@ async def admin_vacancy_test(callback: CallbackQuery, bot: Bot) -> None:
                     break
         except TestApiError:
             pass
-        db.set_vacancy_test(vacancy_id, test_id, title)
+        # Test biriktirilganda — sukut bo'yicha MAJBURIY (ariza yakuniy bosqichi).
+        # Admin xohlasa "❗ Majburiy" tugmasi orqali ixtiyoriy qilishi mumkin.
+        db.set_vacancy_test(vacancy_id, test_id, title, test_required=True)
         db.add_admin_log(callback.from_user.id, "attach_test", "vacancy", vacancy_id, f"test_id={test_id}")
         vacancy = db.get_vacancy(vacancy_id)
-        required = int(row_get(vacancy, "test_required", 0)) == 1
         await callback.message.answer(
-            f"✅ Test biriktirildi: <b>{esc(title)}</b>\n\n" + vacancy_test_menu_text(vacancy),
-            reply_markup=vacancy_test_menu_keyboard(vacancy_id, True, required),
+            f"✅ Test biriktirildi: <b>{esc(title)}</b>\n\n"
+            "Nomzod bu vakansiyaga ariza berganda testdan o'tishi <b>majburiy</b> bo'ladi "
+            "(o'zgartirish uchun «❗ Majburiy» tugmasidan foydalaning).\n\n"
+            + vacancy_test_menu_text(vacancy),
+            reply_markup=vacancy_test_menu_keyboard(vacancy_id, True, True),
         )
         await callback.answer("Test biriktirildi.")
         return
@@ -3684,24 +3726,41 @@ async def seeker_vacancy_interest(callback: CallbackQuery, bot: Bot) -> None:
     if clean_text(row_get(vacancy, "moderation_status"), "pending") != "approved" or int(row_get(vacancy, "active", 0)) != 1:
         await callback.answer("Vakansiya hozir aktiv emas.", show_alert=True)
         return
+    test_id = row_get(vacancy, "test_id")
+    test_required = int(row_get(vacancy, "test_required", 0) or 0) == 1
+    # Majburiy test — ariza YAKUNIY bosqichi. Test yakunlanmaguncha ish beruvchiga
+    # yuborilmaydi. (Test biriktirilgan-u, integratsiya sozlanmagan bo'lsa — bloklamaymiz.)
+    gate = bool(test_id) and test_required and test_client.enabled
+
     interest_id = db.create_interest(
         vacancy_id,
         int(row_get(seeker, "id")),
         int(row_get(vacancy, "employer_tg_id")),
         int(row_get(seeker, "telegram_id")),
-        "seeker_requested",
+        "test_pending" if gate else "seeker_requested",
     )
-    await bot.send_message(
-        int(row_get(vacancy, "employer_tg_id")),
-        "📩 <b>Nomzod vakansiyangizga qiziqish bildirdi</b>\n\n"
-        + f"🎯 Moslik: {match_score(seeker, vacancy)}%\n\n"
-        + seeker_match_card(seeker),
-        reply_markup=employer_candidate_request_keyboard(interest_id),
-    )
-    await callback.message.answer("✅ Ish beruvchiga aloqa so'rovi yuborildi.")
+
+    if not gate:
+        # Test yo'q yoki ixtiyoriy — ish beruvchiga darhol yuboramiz (eski xatti-harakat).
+        await bot.send_message(
+            int(row_get(vacancy, "employer_tg_id")),
+            "📩 <b>Nomzod vakansiyangizga qiziqish bildirdi</b>\n\n"
+            + f"🎯 Moslik: {match_score(seeker, vacancy)}%\n\n"
+            + seeker_match_card(seeker),
+            reply_markup=employer_candidate_request_keyboard(interest_id),
+        )
+        await callback.message.answer("✅ Ish beruvchiga aloqa so'rovi yuborildi.")
+    else:
+        await callback.message.answer(
+            "✅ Arizangiz qabul qilindi.\n\n"
+            "📝 <b>Yakuniy bosqich:</b> ushbu vakansiya uchun testdan o'tishingiz kerak.\n"
+            "Test yakunlangach, natijangiz bilan birga arizangiz ish beruvchiga yuboriladi.\n\n"
+            "Quyidagi tugma orqali testni boshlang 👇"
+        )
     await callback.answer()
-    # Vakansiyaga test biriktirilgan bo'lsa — nomzodga testni tayinlaymiz.
-    if row_get(vacancy, "test_id"):
+
+    # Vakansiyaga test biriktirilgan bo'lsa — nomzodga testni tayinlaymiz (deep link).
+    if test_id:
         try:
             await assign_test_for_application(
                 bot, application_id=interest_id, vacancy=vacancy, seeker=seeker

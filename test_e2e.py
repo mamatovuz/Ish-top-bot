@@ -119,8 +119,10 @@ async def wait_health(timeout: float = 30) -> bool:
 
 
 async def run() -> None:
-    # 1) Ish Topish natija API (bu jarayonda)
-    runner = await result_api.start_result_api()
+    # 1) Ish Topish natija API (bu jarayonda). Notifier = real on_test_result,
+    #    shunda gate (test_pending → ish beruvchiga yuborish) ham tekshiriladi.
+    main._RESULT_BOT = StubBot()
+    runner = await result_api.start_result_api(notifier=main.on_test_result)
 
     # 2) DoriKent'ni GET /health orqali kutamiz
     healthy = await wait_health()
@@ -166,8 +168,9 @@ async def run() -> None:
     # 5) Vakansiyaga testni biriktiramiz
     db.set_vacancy_test(vacancy_id, int(e2e_test["id"]), e2e_test["title"], test_required=True)
 
-    # 6) Nomzod ariza beradi (interest) + REAL assign path (main.assign_test_for_application)
-    interest_id = db.create_interest(vacancy_id, seeker_id, employer_tg, seeker_tg, "seeker_requested")
+    # 6) Nomzod ariza beradi — MAJBURIY test (gate): interest 'test_pending' bo'ladi,
+    #    ish beruvchiga faqat test yakunlangach yuboriladi.
+    interest_id = db.create_interest(vacancy_id, seeker_id, employer_tg, seeker_tg, "test_pending")
     vacancy = db.get_vacancy(vacancy_id)
     seeker = db.get_seeker(seeker_id)
     await main.assign_test_for_application(
@@ -202,7 +205,13 @@ async def run() -> None:
               int(saved["candidate_id"]) == seeker_id and int(saved["vacancy_id"]) == vacancy_id
               and int(saved["test_id"]) == int(e2e_test["id"]))
 
-    # 8) "Mening arizam" ko'rinishida natija matni chiqadimi
+    # 8) Gate: test yakunlangach interest 'test_completed' bo'lib, ish beruvchiga yuborilgan
+    interest = db.get_interest(interest_id)
+    check("majburiy test yakunlangach ariza ish beruvchiga o'tdi (test_completed)",
+          interest is not None and interest["status"] == "test_completed",
+          interest["status"] if interest else "yo'q")
+
+    # 9) "Mening arizam" ko'rinishida natija matni chiqadimi
     block = main.candidate_tests_block(seeker_id)
     check("Mening arizam natijani ko'rsatadi", "66.7%" in block and "o'ta olmadi" in block.lower(),
           block.replace("\n", " ")[:80])

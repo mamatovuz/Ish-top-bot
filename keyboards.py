@@ -433,6 +433,7 @@ def candidate_filter_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="🧭 Ish turi", callback_data="filter:job_type"),
                 InlineKeyboardButton(text="💰 Maosh", callback_data="filter:salary"),
             ],
+            [InlineKeyboardButton(text="📝 Test holati", callback_data="filter:test")],
             [
                 InlineKeyboardButton(text="👁 Ko'rish", callback_data="filter:show"),
                 InlineKeyboardButton(text="📤 Excel eksport", callback_data="filter:excel"),
@@ -469,7 +470,71 @@ def vacancy_edit_fields_keyboard(vacancy_id: int) -> InlineKeyboardMarkup:
     for title, field in fields:
         builder.button(text=title, callback_data=f"vac_edit:{vacancy_id}:{field}")
     builder.adjust(2)
+    builder.row(
+        InlineKeyboardButton(text="📝 Test biriktirish", callback_data=f"vac_test:menu:{vacancy_id}")
+    )
     return builder.as_markup()
+
+
+def vacancy_test_menu_keyboard(vacancy_id: int, has_test: bool, test_required: bool) -> InlineKeyboardMarkup:
+    """Vakansiya test sozlamalari menyusi."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="🔁 Testni almashtirish" if has_test else "➕ Test tanlash",
+        callback_data=f"vac_test:list:{vacancy_id}",
+    )
+    if has_test:
+        req_text = "❗ Majburiy: ✅" if test_required else "❗ Majburiy: ❌"
+        builder.button(text=req_text, callback_data=f"vac_test:required:{vacancy_id}")
+        builder.button(text="🗑 Testni olib tashlash", callback_data=f"vac_test:remove:{vacancy_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def test_select_keyboard(vacancy_id: int, tests, current_test_id=None) -> InlineKeyboardMarkup:
+    """DoriKent'dan olingan testlar ro'yxati (inline tanlov)."""
+    builder = InlineKeyboardBuilder()
+    for test in tests:
+        title = test["title"]
+        count = test.get("questions_count") or 0
+        mark = "✅ " if current_test_id is not None and int(test["id"]) == int(current_test_id) else ""
+        builder.button(
+            text=f"{mark}{title} — {count} savol",
+            callback_data=f"vac_test:pick:{vacancy_id}:{test['id']}",
+        )
+    builder.button(text="♻️ Yangilash", callback_data=f"vac_test:list:{vacancy_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def start_test_keyboard(
+    bot_username: str, assignment_id: int, deep_link: str | None = None
+) -> InlineKeyboardMarkup:
+    """Nomzod uchun 'Testni boshlash' deep-link tugmasi.
+
+    DoriKent API tayyor `deep_link` qaytargan bo'lsa (source of truth) undan
+    foydalanamiz; aks holda username + assignment_id dan quramiz.
+    """
+    url = deep_link or f"https://t.me/{bot_username}?start=test_{assignment_id}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📝 Testni boshlash", url=url)]]
+    )
+
+
+def candidate_test_filter_keyboard() -> InlineKeyboardMarkup:
+    """Admin uchun nomzodlarni test holati bo'yicha filtrlash."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📝 Test topshirgan", callback_data="testfilter:has_test"),
+                InlineKeyboardButton(text="🚫 Topshirmagan", callback_data="testfilter:no_test"),
+            ],
+            [
+                InlineKeyboardButton(text="🟢 O'tgan", callback_data="testfilter:passed"),
+                InlineKeyboardButton(text="🔴 O'ta olmagan", callback_data="testfilter:failed"),
+            ],
+        ]
+    )
 
 
 def channel_settings_keyboard() -> InlineKeyboardMarkup:

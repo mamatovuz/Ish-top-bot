@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import html
 import logging
 import re
@@ -15,8 +16,18 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, ChatMemberUpdated, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from config import ADMIN_IDS, BOT_TOKEN, PUBLIC_CHANNEL_ID, PRIVATE_CHANNEL_ID, is_admin as is_env_admin
-from database import db
+from config import (
+    ADMIN_IDS,
+    BOT_TOKEN,
+    PUBLIC_CHANNEL_ID,
+    PRIVATE_CHANNEL_ID,
+    DORIKENT_TEST_BOT_USERNAME,
+    dorikent_integration_enabled,
+    is_admin as is_env_admin,
+)
+from database import db, now_iso
+from services.test_api import TestApiError, test_client
+from services.result_api import start_result_api
 from keyboards import (
     CANCEL,
     SKIP,
@@ -58,6 +69,10 @@ from keyboards import (
     vacancy_edit_fields_keyboard,
     vacancy_moderation_keyboard,
     employer_candidate_request_keyboard,
+    vacancy_test_menu_keyboard,
+    test_select_keyboard,
+    start_test_keyboard,
+    candidate_test_filter_keyboard,
 )
 from locations import DISTRICTS, REGIONS
 
@@ -814,6 +829,9 @@ async def send_matches_to_employer(bot: Bot, vacancy: Any) -> None:
         markup = employer_candidate_keyboard(int(row_get(vacancy, "id")), int(row_get(seeker, "id")))
         score = match_score(seeker, vacancy)
         caption = f"🎯 <b>Moslik: {score}%</b>\n\n" + seeker_match_card(seeker)
+        test_line = candidate_test_summary_line(int(row_get(seeker, "id")))
+        if test_line:
+            caption += f"\n\n{test_line}"
         try:
             await bot.send_photo(
                 employer_tg_id,
@@ -885,6 +903,299 @@ async def notify_candidate_about_interest(bot: Bot, interest_id: int, vacancy: A
     )
 
 
+# ── DoriKent Test integratsiyasi ────────────────────────────────────────────
+
+# Qayta urinish (retry) kechikishlari (soniya): 1 daqiqa, 5 daqiqa, 15 daqiqa,
+# keyin 15 daqiqada takrorlanadi. MAX_SYNC_ATTEMPTS dan keyin xato deb belgilanadi.
+TEST_RETRY_DELAYS = [60, 300, 900]
+MAX_SYNC_ATTEMPTS = 8
+
+
+def system_log(action: str, target_id: int | None, details: str) -> None:
+    """Muhim test eventlarini admin log tizimiga yozish (system = tg_id 0)."""
+    try:
+        db.add_admin_log(0, action, "application_test", target_id, details)
+    except Exception:  # noqa: BLE001
+        logger.exception("Admin logga yozib bo'lmadi: %s", action)
+
+
+def _retry_delay(attempts: int) -> int:
+    if attempts < len(TEST_RETRY_DELAYS):
+        return TEST_RETRY_DELAYS[attempts]
+    return TEST_RETRY_DELAYS[-1]
+
+
+def fmt_percent(value: Any) -> str:
+    """Foizni chiroyli ko'rsatish: 100.0 -> '100', 66.7 -> '66.7'."""
+    if value in (None, ""):
+        return "-"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(num)) if num == int(num) else str(round(num, 1))
+
+
+def test_result_status_text(status: Any) -> str:
+    value = clean_text(status, "").lower()
+    mapping = {
+        "assigned": "🟡 Test tayinlandi",
+        "started": "🟠 Test boshlangan",
+        "completed": "🔵 Yakunlangan",
+        "passed": "🟢 Testdan o'tdi",
+        "failed": "🔴 Testdan o'ta olmadi",
+        "expired": "⚫️ Muddati o'tgan",
+    }
+    return mapping.get(value, "🟡 Test tayinlandi")
+
+
+def application_test_card(test_row: Any, vacancy: Any = None) -> str:
+    """Nomzod/admin uchun bitta test tayinlovi/natijasi matni."""
+    vac = vacancy or db.get_vacancy(int(row_get(test_row, "vacancy_id")))
+    vac_title = clean_text(row_get(vac, "profession_title"), "-") if vac else "-"
+    lines = [
+        f"💼 Vakansiya: {esc(vac_title)}",
+        f"📝 Test: {esc(row_get(test_row, 'test_title', 'Test'))}",
+    ]
+    status = clean_text(row_get(test_row, "status"), "assigned")
+    percentage = row_get(test_row, "percentage")
+    correct = row_get(test_row, "correct_answers")
+    total = row_get(test_row, "total_questions")
+    if status in ("completed", "passed", "failed") and percentage not in (None, ""):
+        lines.append(f"🎯 Natija: {fmt_percent(percentage)}%")
+        if correct not in (None, "") and total not in (None, ""):
+            wrong = row_get(test_row, "wrong_answers")
+            lines.append(f"✅ To'g'ri: {esc(correct)}/{esc(total)}")
+            if wrong not in (None, ""):
+                lines.append(f"❌ Noto'g'ri: {esc(wrong)}")
+    sync = clean_text(row_get(test_row, "sync_status"), "")
+    if sync == "sync_pending" and not row_get(test_row, "assignment_id"):
+        lines.append("⏳ Holat: tayinlash navbatda (server bilan bog'lanilmoqda)")
+    elif sync == "failed":
+        lines.append("⚠️ Holat: testni tayinlashda xatolik (admin bilan bog'laning)")
+    else:
+        lines.append(f"🟢 Holat: {test_result_status_text(status)}")
+    return "\n".join(lines)
+
+
+def candidate_test_summary_line(candidate_id: int) -> str:
+    """Nomzodning eng oxirgi test holatini bitta qatorda (match kartasi uchun)."""
+    tests = db.list_application_tests_by_candidate(candidate_id)
+    if not tests:
+        return ""
+    latest = tests[0]
+    status = clean_text(row_get(latest, "status"), "assigned")
+    if status in ("passed", "failed", "completed"):
+        pct = row_get(latest, "percentage")
+        return f"📝 Test: {fmt_percent(pct)}% — {test_result_status_text(status)}"
+    return f"📝 Test: {test_result_status_text(status)}"
+
+
+def candidate_tests_block(candidate_id: int) -> str:
+    """Nomzodning barcha test tayinlovlari (Mening arizam / admin uchun)."""
+    tests = db.list_application_tests_by_candidate(candidate_id)
+    if not tests:
+        return ""
+    blocks = [application_test_card(test) for test in tests]
+    return "\n\n📝 <b>Test natijalari</b>\n━━━━━━━━━━━━━━\n\n" + "\n\n".join(blocks)
+
+
+async def send_test_assignment_message(
+    bot: Bot, telegram_id: int, vacancy: Any, test_row: Any, deep_link: str | None = None
+) -> None:
+    """Nomzodga 'Sizga test tayinlandi' xabarini deep-link tugmasi bilan yuborish."""
+    assignment_id = row_get(test_row, "assignment_id")
+    if not assignment_id:
+        return
+    # Deep-link: DoriKent bergan bo'lsa undan, aks holda username dan quramiz.
+    if not deep_link and not DORIKENT_TEST_BOT_USERNAME:
+        logger.warning(
+            "Deep-link yasab bo'lmadi: DORIKENT_TEST_BOT_USERNAME sozlanmagan "
+            "va DoriKent deep_link qaytarmadi (assignment=%s).",
+            assignment_id,
+        )
+        return
+    total = row_get(test_row, "total_questions")
+    questions_line = f"Savollar: {esc(total)} ta\n\n" if total not in (None, "") else ""
+    text = (
+        "📝 <b>Sizga test tayinlandi!</b>\n\n"
+        f"💼 Vakansiya:\n{esc(row_get(vacancy, 'profession_title'))}\n\n"
+        f"📚 Test:\n{esc(row_get(test_row, 'test_title', 'Test'))}\n\n"
+        f"{questions_line}"
+        "Testni boshlash uchun tugmani bosing."
+    )
+    await bot.send_message(
+        telegram_id,
+        text,
+        reply_markup=start_test_keyboard(
+            DORIKENT_TEST_BOT_USERNAME, int(assignment_id), deep_link
+        ),
+    )
+
+
+async def assign_test_for_application(
+    bot: Bot,
+    *,
+    application_id: int,
+    vacancy: Any,
+    seeker: Any,
+    notify: bool = True,
+) -> None:
+    """Vakansiyaga test biriktirilgan bo'lsa, nomzodga testni tayinlash.
+
+    - test_id NULL bo'lsa hech narsa qilinmaydi.
+    - Avval lokal DB da yozuv (sync_pending) yaratiladi — ariza yo'qolmaydi.
+    - So'ng DoriKent API chaqiriladi. Xato bo'lsa background retry ushlaydi.
+    """
+    test_id = row_get(vacancy, "test_id")
+    if not test_id:
+        return
+    candidate_id = int(row_get(seeker, "id"))
+    telegram_id = int(row_get(seeker, "telegram_id"))
+    vacancy_id = int(row_get(vacancy, "id"))
+    test_title = clean_text(row_get(vacancy, "test_title"), "Test")
+
+    # Bu ariza uchun aktiv (bekor qilinmagan) test allaqachon bormi?
+    existing = db.get_active_application_test(application_id)
+    if existing is not None:
+        # Allaqachon tayinlangan bo'lsa qayta xabar yubormaymiz.
+        if row_get(existing, "assignment_id") and notify:
+            try:
+                await send_test_assignment_message(bot, telegram_id, vacancy, existing)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Test xabarini qayta yuborib bo'lmadi: %s", exc)
+        return
+
+    row_id = db.create_application_test(
+        application_id=application_id,
+        candidate_id=candidate_id,
+        telegram_id=telegram_id,
+        vacancy_id=vacancy_id,
+        test_id=int(test_id),
+        test_title=test_title,
+    )
+
+    if not test_client.enabled:
+        system_log("TEST_ASSIGN_FAILED", row_id, "Integratsiya sozlanmagan — sync_pending")
+        return
+
+    try:
+        result = await test_client.assign_test(
+            candidate_id=candidate_id,
+            telegram_id=telegram_id,
+            vacancy_id=vacancy_id,
+            test_id=int(test_id),
+            external_application_id=application_id,
+        )
+    except TestApiError as exc:
+        delay = _retry_delay(0)
+        db.mark_application_test_sync_failed(row_id, str(exc), from_now_iso(delay))
+        system_log("TEST_ASSIGN_FAILED", row_id, f"{exc} — {delay}s dan keyin qayta urinish")
+        logger.warning("Testni tayinlab bo'lmadi (app=%s): %s", application_id, exc)
+        return
+
+    db.mark_application_test_assigned(
+        row_id,
+        assignment_id=result["assignment_id"],
+        test_title=result.get("test_title") or test_title,
+        total_questions=result.get("total_questions"),
+    )
+    system_log("TEST_ASSIGNED", row_id, f"assignment={result['assignment_id']} candidate={candidate_id}")
+    if notify:
+        test_row = db.get_application_test(row_id)
+        try:
+            await send_test_assignment_message(
+                bot, telegram_id, vacancy, test_row, deep_link=result.get("deep_link")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Test xabarini yuborib bo'lmadi: %s", exc)
+
+
+async def test_sync_worker(bot: Bot) -> None:
+    """Fon vazifa: DoriKent API vaqtincha ishlamaganda testlarni qayta tayinlaydi."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            if test_client.enabled:
+                pending = db.list_pending_sync_tests(now_iso(), limit=20)
+                for row in pending:
+                    row_id = int(row["id"])
+                    attempts = int(row["sync_attempts"])
+                    if attempts >= MAX_SYNC_ATTEMPTS:
+                        db.mark_application_test_failed_permanently(
+                            row_id, "Maksimal urinishlar tugadi"
+                        )
+                        system_log("TEST_ASSIGN_FAILED", row_id, "Maksimal urinishlar tugadi — bekor qilindi")
+                        continue
+                    vacancy = db.get_vacancy(int(row["vacancy_id"]))
+                    seeker = db.get_seeker(int(row["candidate_id"]))
+                    if not vacancy or not seeker:
+                        db.mark_application_test_failed_permanently(row_id, "Vakansiya/nomzod topilmadi")
+                        continue
+                    try:
+                        result = await test_client.assign_test(
+                            candidate_id=int(row["candidate_id"]),
+                            telegram_id=int(row["telegram_id"]),
+                            vacancy_id=int(row["vacancy_id"]),
+                            test_id=int(row["test_id"]),
+                            external_application_id=int(row["application_id"]),
+                        )
+                    except TestApiError as exc:
+                        delay = _retry_delay(attempts + 1)
+                        db.mark_application_test_sync_failed(row_id, str(exc), from_now_iso(delay))
+                        system_log("TEST_API_ERROR", row_id, f"retry {attempts + 1}: {exc}")
+                        continue
+                    db.mark_application_test_assigned(
+                        row_id,
+                        assignment_id=result["assignment_id"],
+                        test_title=result.get("test_title") or row["test_title"],
+                        total_questions=result.get("total_questions"),
+                    )
+                    system_log("TEST_ASSIGNED", row_id, f"assignment={result['assignment_id']} (retry)")
+                    test_row = db.get_application_test(row_id)
+                    try:
+                        await send_test_assignment_message(
+                            bot, int(row["telegram_id"]), vacancy, test_row,
+                            deep_link=result.get("deep_link"),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Test xabarini yuborib bo'lmadi (retry): %s", exc)
+        except Exception:  # noqa: BLE001 - worker hech qachon o'lmasin
+            logger.exception("test_sync_worker xatosi")
+        await asyncio.sleep(60)
+
+
+async def on_test_result(saved_row: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Natija API dan chaqiriladi: nomzodga natija haqida xabar berish."""
+    telegram_id = payload.get("telegram_id")
+    if not telegram_id or _RESULT_BOT is None:
+        return
+    vacancy = db.get_vacancy(int(payload["vacancy_id"]))
+    vac_title = clean_text(row_get(vacancy, "profession_title"), "-") if vacancy else "-"
+    status = str(payload.get("status", "")).lower()
+    text = (
+        "📊 <b>Test natijangiz keldi!</b>\n\n"
+        f"💼 Vakansiya: {esc(vac_title)}\n"
+        f"📝 Test: {esc(saved_row.get('test_title', 'Test'))}\n"
+        f"🎯 Natija: {fmt_percent(payload.get('percentage'))}%\n"
+        f"✅ To'g'ri: {esc(payload.get('correct_answers'))}/{esc(payload.get('total_questions'))}\n"
+        f"{test_result_status_text(status)}\n\n"
+        "Batafsil ma'lumotni <b>📄 Mening arizam</b> bo'limida ko'rishingiz mumkin."
+    )
+    try:
+        await _RESULT_BOT.send_message(int(telegram_id), text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Nomzodga natija xabarini yuborib bo'lmadi: %s", exc)
+
+
+# Natija notifier uchun bot nusxasi (main() da o'rnatiladi)
+_RESULT_BOT: Bot | None = None
+
+
+def from_now_iso(seconds: int) -> str:
+    return (datetime.now() + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+
+
 def filter_status_text(filters: dict[str, Any]) -> str:
     parts = []
     if filters.get("gender"):
@@ -950,9 +1261,30 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
             "Moderatsiya",
             "Qo'shimcha",
             "Yaratilgan",
+            "Test",
+            "Test holati",
+            "To'g'ri javob",
+            "Noto'g'ri javob",
+            "Jami savollar",
+            "Foiz",
+            "O'tdi/O'tmadi",
+            "Test boshlangan",
+            "Test tugagan",
         ]
     )
+
+    def _passed_text(status: Any) -> str:
+        value = clean_text(status, "").lower()
+        if value == "passed":
+            return "O'tdi"
+        if value == "failed":
+            return "O'tmadi"
+        return "-"
+
     for seeker in rows:
+        tests = db.list_application_tests_by_candidate(int(row_get(seeker, "id")))
+        latest = tests[0] if tests else None
+        result_status = row_get(latest, "result_status") or row_get(latest, "status") if latest else ""
         ws.append(
             [
                 row_get(seeker, "id"),
@@ -981,6 +1313,15 @@ def export_seekers_to_excel(rows, filename: str = "nomzodlar.xlsx") -> Path:
                 row_get(seeker, "moderation_status"),
                 row_get(seeker, "extra"),
                 row_get(seeker, "created_at"),
+                row_get(latest, "test_title") if latest else "-",
+                row_get(latest, "status") if latest else "-",
+                row_get(latest, "correct_answers") if latest else "-",
+                row_get(latest, "wrong_answers") if latest else "-",
+                row_get(latest, "total_questions") if latest else "-",
+                row_get(latest, "percentage") if latest else "-",
+                _passed_text(result_status) if latest else "-",
+                row_get(latest, "started_at") if latest else "-",
+                row_get(latest, "completed_at") if latest else "-",
             ]
         )
     for column in ws.columns:
@@ -2047,17 +2388,53 @@ async def admin_candidate_filter_callback(callback: CallbackQuery, state: FSMCon
         await state.update_data(filters={})
         await callback.message.answer("Filtrlar tozalandi.", reply_markup=admin_menu())
         await show_candidate_filter_menu(callback.message, state)
+    elif action == "test":
+        await callback.message.answer(
+            "📝 Nomzodlarni test holati bo'yicha filtrlash:",
+            reply_markup=candidate_test_filter_keyboard(),
+        )
     elif action == "show":
         rows = db.filter_seekers(filters)
         await callback.message.answer(f"{len(rows)} ta nomzod topildi.", reply_markup=admin_menu())
         for seeker in rows[:10]:
-            await callback.message.answer(seeker_card(seeker, hide_phone=False))
+            card = seeker_card(seeker, hide_phone=False)
+            tests_block = candidate_tests_block(int(row_get(seeker, "id")))
+            await callback.message.answer(card + tests_block)
         if len(rows) > 10:
             await callback.message.answer("Faqat birinchi 10 ta nomzod ko'rsatildi. To'liq ro'yxat uchun Excel eksportdan foydalaning.")
     elif action == "excel":
         rows = db.filter_seekers(filters)
         path = export_seekers_to_excel(rows)
         await callback.message.answer_document(FSInputFile(path), caption=f"{len(rows)} ta nomzod eksport qilindi.")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("testfilter:"))
+async def admin_candidate_test_filter(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    test_filter = callback.data.split(":")[1]
+    data = await state.get_data()
+    filters = data.get("filters", {})
+    base_rows = db.filter_seekers(filters)
+    rows = db.filter_seekers_by_test(base_rows, test_filter)
+    labels = {
+        "has_test": "Test topshirgan",
+        "no_test": "Test topshirmagan",
+        "passed": "Testdan o'tgan",
+        "failed": "Testdan o'ta olmagan",
+    }
+    await callback.message.answer(
+        f"📝 <b>{labels.get(test_filter, test_filter)}</b>: {len(rows)} ta nomzod",
+        reply_markup=admin_menu(),
+    )
+    for seeker in rows[:10]:
+        card = seeker_card(seeker, hide_phone=False)
+        tests_block = candidate_tests_block(int(row_get(seeker, "id")))
+        await callback.message.answer(card + tests_block)
+    if len(rows) > 10:
+        await callback.message.answer("Faqat birinchi 10 ta ko'rsatildi. To'liq ro'yxat uchun Excel eksportdan foydalaning.")
     await callback.answer()
 
 
@@ -2319,6 +2696,119 @@ async def admin_vacancy_edit_value(message: Message, state: FSMContext, bot: Bot
     await message.answer("Vakansiya tahrirlandi.", reply_markup=admin_menu())
 
 
+def vacancy_test_menu_text(vacancy: Any) -> str:
+    test_id = row_get(vacancy, "test_id")
+    if test_id:
+        required = int(row_get(vacancy, "test_required", 0)) == 1
+        required_text = "Ha" if required else "Yo'q"
+        return (
+            f"📝 <b>Vakansiya #{row_get(vacancy, 'id')} — Test sozlamalari</b>\n\n"
+            f"📚 Biriktirilgan test: {esc(row_get(vacancy, 'test_title', 'Test'))} (ID: {esc(test_id)})\n"
+            f"❗ Majburiy: {required_text}\n\n"
+            "Nomzod ariza topshirganda bu test avtomatik tayinlanadi."
+        )
+    return (
+        f"📝 <b>Vakansiya #{row_get(vacancy, 'id')} — Test sozlamalari</b>\n\n"
+        "Hozircha test biriktirilmagan.\n"
+        "Test biriktirsangiz, nomzod ariza topshirganda unga avtomatik tayinlanadi."
+    )
+
+
+@router.callback_query(F.data.startswith("vac_test:"))
+async def admin_vacancy_test(callback: CallbackQuery, bot: Bot) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Ruxsat yo'q.", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    action = parts[1]
+    vacancy_id = int(parts[2])
+    vacancy = db.get_vacancy(vacancy_id)
+    if not vacancy:
+        await callback.answer("Vakansiya topilmadi.", show_alert=True)
+        return
+
+    if action == "menu":
+        has_test = bool(row_get(vacancy, "test_id"))
+        required = int(row_get(vacancy, "test_required", 0)) == 1
+        await callback.message.answer(
+            vacancy_test_menu_text(vacancy),
+            reply_markup=vacancy_test_menu_keyboard(vacancy_id, has_test, required),
+        )
+        await callback.answer()
+        return
+
+    if action == "list":
+        if not test_client.enabled:
+            await callback.answer(
+                "DoriKent integratsiyasi sozlanmagan (.env: DORIKENT_TEST_API_URL / SECRET).",
+                show_alert=True,
+            )
+            return
+        await callback.answer("Testlar yuklanmoqda...")
+        try:
+            tests = await test_client.get_tests()
+        except TestApiError as exc:
+            await callback.message.answer(f"⚠️ Testlarni olishda xato:\n{esc(exc.message)}")
+            return
+        if not tests:
+            await callback.message.answer("DoriKent'da aktiv test topilmadi.")
+            return
+        await callback.message.answer(
+            "📝 <b>Testlar</b>\n\nBiriktirish uchun testni tanlang:",
+            reply_markup=test_select_keyboard(vacancy_id, tests, row_get(vacancy, "test_id")),
+        )
+        return
+
+    if action == "pick":
+        test_id = int(parts[3])
+        title = f"Test #{test_id}"
+        # Test nomini olish uchun ro'yxatni qayta so'raymiz (xato bo'lsa ham davom etamiz).
+        try:
+            for test in await test_client.get_tests():
+                if int(test["id"]) == test_id:
+                    title = test["title"]
+                    break
+        except TestApiError:
+            pass
+        db.set_vacancy_test(vacancy_id, test_id, title)
+        db.add_admin_log(callback.from_user.id, "attach_test", "vacancy", vacancy_id, f"test_id={test_id}")
+        vacancy = db.get_vacancy(vacancy_id)
+        required = int(row_get(vacancy, "test_required", 0)) == 1
+        await callback.message.answer(
+            f"✅ Test biriktirildi: <b>{esc(title)}</b>\n\n" + vacancy_test_menu_text(vacancy),
+            reply_markup=vacancy_test_menu_keyboard(vacancy_id, True, required),
+        )
+        await callback.answer("Test biriktirildi.")
+        return
+
+    if action == "required":
+        current = int(row_get(vacancy, "test_required", 0)) == 1
+        db.set_vacancy_test_required(vacancy_id, not current)
+        db.add_admin_log(
+            callback.from_user.id, "toggle_test_required", "vacancy", vacancy_id, str(not current)
+        )
+        vacancy = db.get_vacancy(vacancy_id)
+        await callback.message.edit_text(
+            vacancy_test_menu_text(vacancy),
+            reply_markup=vacancy_test_menu_keyboard(vacancy_id, True, not current),
+        )
+        await callback.answer("Majburiylik o'zgartirildi.")
+        return
+
+    if action == "remove":
+        db.set_vacancy_test(vacancy_id, None, None, test_required=False)
+        db.add_admin_log(callback.from_user.id, "detach_test", "vacancy", vacancy_id)
+        vacancy = db.get_vacancy(vacancy_id)
+        await callback.message.edit_text(
+            vacancy_test_menu_text(vacancy),
+            reply_markup=vacancy_test_menu_keyboard(vacancy_id, False, False),
+        )
+        await callback.answer("Test olib tashlandi.")
+        return
+
+    await callback.answer()
+
+
 @router.message(F.text == "📄 Mening arizam", StateFilter("*"))
 async def my_seeker_profile(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -2342,6 +2832,9 @@ async def my_seeker_profile(message: Message, state: FSMContext) -> None:
             document=row_get(seeker, "resume_file_id"),
             caption=f"📎 Rezyume: {esc(row_get(seeker, 'resume_file_name', 'resume'))}",
         )
+    tests_block = candidate_tests_block(int(row_get(seeker, "id")))
+    if tests_block:
+        await message.answer(tests_block.lstrip("\n"))
 
 
 @router.callback_query(F.data == "my_seeker:edit")
@@ -3207,6 +3700,14 @@ async def seeker_vacancy_interest(callback: CallbackQuery, bot: Bot) -> None:
     )
     await callback.message.answer("✅ Ish beruvchiga aloqa so'rovi yuborildi.")
     await callback.answer()
+    # Vakansiyaga test biriktirilgan bo'lsa — nomzodga testni tayinlaymiz.
+    if row_get(vacancy, "test_id"):
+        try:
+            await assign_test_for_application(
+                bot, application_id=interest_id, vacancy=vacancy, seeker=seeker
+            )
+        except Exception as exc:  # noqa: BLE001 - test xatosi arizani buzmasin
+            logger.warning("Test tayinlashda xatolik (interest=%s): %s", interest_id, exc)
 
 
 @router.callback_query(F.data.startswith("emp_accept_request:"))
@@ -3346,11 +3847,37 @@ async def main() -> None:
         BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+    global _RESULT_BOT
+    _RESULT_BOT = bot
+
     dp = Dispatcher(storage=MemoryStorage())
     router.message.middleware(SubscriptionMiddleware())
     router.callback_query.middleware(SubscriptionMiddleware())
     dp.include_router(router)
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+    # Natija (result) API serverini ishga tushirish
+    result_runner = await start_result_api(
+        admin_log=lambda event, target_id, details: system_log(event, target_id, details),
+        notifier=on_test_result,
+    )
+    # Fon vazifa: DoriKent API vaqtincha ishlamaganda testlarni qayta tayinlash
+    worker_task = asyncio.create_task(test_sync_worker(bot))
+
+    if dorikent_integration_enabled():
+        logger.info("DoriKent Test integratsiyasi YOQILGAN.")
+    else:
+        logger.warning(
+            "DoriKent Test integratsiyasi sozlanmagan — testlar tayinlanmaydi "
+            "(.env: DORIKENT_TEST_API_URL / DORIKENT_TEST_API_SECRET)."
+        )
+
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker_task
+        await result_runner.cleanup()
 
 
 if __name__ == "__main__":

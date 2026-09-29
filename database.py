@@ -169,6 +169,47 @@ class Database:
                 created_at TEXT NOT NULL,
                 UNIQUE(item_type, item_id, admin_tg_id, message_id)
             );
+
+            -- DoriKent Test Bot integratsiyasi: nomzod arizasiga biriktirilgan
+            -- test tayinlovi va uning natijasi. Savollar/javoblar bu yerda
+            -- SAQLANMAYDI — ular DoriKent botda qoladi.
+            CREATE TABLE IF NOT EXISTS application_tests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id INTEGER NOT NULL,
+                candidate_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                vacancy_id INTEGER NOT NULL,
+                test_id INTEGER NOT NULL,
+                test_title TEXT,
+                assignment_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'assigned',
+                total_questions INTEGER,
+                correct_answers INTEGER,
+                wrong_answers INTEGER,
+                score INTEGER,
+                percentage INTEGER,
+                result_status TEXT,
+                sync_status TEXT NOT NULL DEFAULT 'sync_pending',
+                sync_error TEXT,
+                sync_attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                assigned_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_application_tests_assignment
+                ON application_tests(assignment_id)
+                WHERE assignment_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_application_tests_application
+                ON application_tests(application_id);
+            CREATE INDEX IF NOT EXISTS idx_application_tests_candidate
+                ON application_tests(candidate_id);
+            CREATE INDEX IF NOT EXISTS idx_application_tests_sync
+                ON application_tests(sync_status);
             """
         )
         self.set_setting_default("force_subscription", "0")
@@ -249,6 +290,10 @@ class Database:
         self._add_column_if_missing("vacancies", "channel_chat_id", "TEXT")
         self._add_column_if_missing("vacancies", "channel_message_id", "INTEGER")
         self._add_column_if_missing("vacancies", "expires_at", "TEXT")
+        # DoriKent Test integratsiyasi uchun vakansiya maydonlari
+        self._add_column_if_missing("vacancies", "test_id", "INTEGER")
+        self._add_column_if_missing("vacancies", "test_title", "TEXT")
+        self._add_column_if_missing("vacancies", "test_required", "INTEGER NOT NULL DEFAULT 0")
 
         self._add_column_if_missing("employers", "district", "TEXT")
 
@@ -1137,6 +1182,269 @@ class Database:
                 (*employer_params, limit),
             ).fetchall(),
         }
+
+
+    # ── DoriKent Test integratsiyasi ────────────────────────────────────────
+
+    def set_vacancy_test(
+        self,
+        vacancy_id: int,
+        test_id: int | None,
+        test_title: str | None = None,
+        test_required: bool | None = None,
+    ) -> None:
+        """Vakansiyaga test biriktirish yoki olib tashlash (test_id=None)."""
+        stamp = now_iso()
+        if test_required is None:
+            self.conn.execute(
+                """
+                UPDATE vacancies
+                SET test_id = ?, test_title = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (test_id, test_title, stamp, vacancy_id),
+            )
+        else:
+            self.conn.execute(
+                """
+                UPDATE vacancies
+                SET test_id = ?, test_title = ?, test_required = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (test_id, test_title, 1 if test_required else 0, stamp, vacancy_id),
+            )
+        self.conn.commit()
+
+    def set_vacancy_test_required(self, vacancy_id: int, required: bool) -> None:
+        self.conn.execute(
+            "UPDATE vacancies SET test_required = ?, updated_at = ? WHERE id = ?",
+            (1 if required else 0, now_iso(), vacancy_id),
+        )
+        self.conn.commit()
+
+    def create_application_test(
+        self,
+        application_id: int,
+        candidate_id: int,
+        telegram_id: int,
+        vacancy_id: int,
+        test_id: int,
+        test_title: str | None = None,
+        assignment_id: int | None = None,
+        status: str = "assigned",
+        sync_status: str = "sync_pending",
+    ) -> int:
+        stamp = now_iso()
+        assigned_at = stamp if assignment_id is not None else None
+        cur = self.conn.execute(
+            """
+            INSERT INTO application_tests(
+                application_id, candidate_id, telegram_id, vacancy_id, test_id, test_title,
+                assignment_id, status, sync_status, assigned_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                application_id,
+                candidate_id,
+                telegram_id,
+                vacancy_id,
+                test_id,
+                test_title,
+                assignment_id,
+                status,
+                sync_status,
+                assigned_at,
+                stamp,
+                stamp,
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_application_test(self, row_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM application_tests WHERE id = ?", (row_id,)
+        ).fetchone()
+
+    def get_application_test_by_assignment(self, assignment_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM application_tests WHERE assignment_id = ?", (assignment_id,)
+        ).fetchone()
+
+    def get_active_application_test(self, application_id: int) -> sqlite3.Row | None:
+        """Ariza uchun eng oxirgi (bekor qilinmagan) test tayinlovi."""
+        return self.conn.execute(
+            """
+            SELECT * FROM application_tests
+            WHERE application_id = ? AND sync_status != 'failed'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (application_id,),
+        ).fetchone()
+
+    def list_application_tests_by_candidate(self, candidate_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT * FROM application_tests
+            WHERE candidate_id = ?
+            ORDER BY id DESC
+            """,
+            (candidate_id,),
+        ).fetchall()
+
+    def list_application_tests_by_vacancy(self, vacancy_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM application_tests WHERE vacancy_id = ? ORDER BY id DESC",
+            (vacancy_id,),
+        ).fetchall()
+
+    def latest_test_for_candidate_vacancy(
+        self, candidate_id: int, vacancy_id: int
+    ) -> sqlite3.Row | None:
+        return self.conn.execute(
+            """
+            SELECT * FROM application_tests
+            WHERE candidate_id = ? AND vacancy_id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (candidate_id, vacancy_id),
+        ).fetchone()
+
+    def mark_application_test_assigned(
+        self,
+        row_id: int,
+        assignment_id: int,
+        test_title: str | None = None,
+        total_questions: int | None = None,
+    ) -> None:
+        stamp = now_iso()
+        self.conn.execute(
+            """
+            UPDATE application_tests
+            SET assignment_id = ?,
+                test_title = COALESCE(?, test_title),
+                total_questions = COALESCE(?, total_questions),
+                status = 'assigned',
+                sync_status = 'synced',
+                sync_error = NULL,
+                assigned_at = COALESCE(assigned_at, ?),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (assignment_id, test_title, total_questions, stamp, stamp, row_id),
+        )
+        self.conn.commit()
+
+    def mark_application_test_sync_failed(
+        self, row_id: int, error: str, next_retry_at: str | None
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE application_tests
+            SET sync_status = 'sync_pending',
+                sync_error = ?,
+                sync_attempts = sync_attempts + 1,
+                next_retry_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (error[:500], next_retry_at, now_iso(), row_id),
+        )
+        self.conn.commit()
+
+    def mark_application_test_failed_permanently(self, row_id: int, error: str) -> None:
+        self.conn.execute(
+            """
+            UPDATE application_tests
+            SET sync_status = 'failed',
+                sync_error = ?,
+                sync_attempts = sync_attempts + 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (error[:500], now_iso(), row_id),
+        )
+        self.conn.commit()
+
+    def list_pending_sync_tests(self, before_iso: str, limit: int = 20) -> list[sqlite3.Row]:
+        """Qayta urinish (retry) kerak bo'lgan, hali tayinlanmagan testlar."""
+        return self.conn.execute(
+            """
+            SELECT * FROM application_tests
+            WHERE sync_status = 'sync_pending'
+                AND assignment_id IS NULL
+                AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            ORDER BY id
+            LIMIT ?
+            """,
+            (before_iso, limit),
+        ).fetchall()
+
+    def save_test_result(self, assignment_id: int, data: dict[str, Any]) -> bool:
+        """DoriKent'dan kelgan natijani saqlash/yangilash. Topilsa True."""
+        row = self.get_application_test_by_assignment(assignment_id)
+        if not row:
+            return False
+        stamp = now_iso()
+        self.conn.execute(
+            """
+            UPDATE application_tests
+            SET total_questions = COALESCE(?, total_questions),
+                correct_answers = ?,
+                wrong_answers = ?,
+                score = ?,
+                percentage = ?,
+                result_status = ?,
+                status = ?,
+                started_at = COALESCE(?, started_at),
+                completed_at = COALESCE(?, completed_at),
+                updated_at = ?
+            WHERE assignment_id = ?
+            """,
+            (
+                data.get("total_questions"),
+                data.get("correct_answers"),
+                data.get("wrong_answers"),
+                data.get("score"),
+                data.get("percentage"),
+                data.get("result_status"),
+                data.get("status", "completed"),
+                data.get("started_at"),
+                data.get("completed_at"),
+                stamp,
+                assignment_id,
+            ),
+        )
+        self.conn.commit()
+        return True
+
+    def filter_seekers_by_test(self, seekers: list[sqlite3.Row], test_filter: str) -> list[sqlite3.Row]:
+        """Nomzodlarni test holati bo'yicha filtrlash (Python tomonda).
+
+        test_filter: 'has_test' | 'no_test' | 'passed' | 'failed'
+        """
+        if not test_filter:
+            return seekers
+        result: list[sqlite3.Row] = []
+        for seeker in seekers:
+            tests = self.list_application_tests_by_candidate(int(seeker["id"]))
+            completed = [t for t in tests if t["status"] in ("completed", "passed", "failed")]
+            if test_filter == "has_test" and completed:
+                result.append(seeker)
+            elif test_filter == "no_test" and not completed:
+                result.append(seeker)
+            elif test_filter == "passed" and any(
+                (t["result_status"] == "passed" or t["status"] == "passed") for t in completed
+            ):
+                result.append(seeker)
+            elif test_filter == "failed" and any(
+                (t["result_status"] == "failed" or t["status"] == "failed") for t in completed
+            ) and not any(
+                (t["result_status"] == "passed" or t["status"] == "passed") for t in completed
+            ):
+                result.append(seeker)
+        return result
 
 
 db = Database()

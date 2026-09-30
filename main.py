@@ -723,7 +723,9 @@ async def send_seeker_moderation_to_admins(bot: Bot, seeker: Any) -> None:
             sent = await bot.send_photo(
                 admin_id,
                 photo=row_get(seeker, "photo_id"),
-                caption="🛂 <b>Yangi ariza moderatsiyada</b>\n\n" + seeker_card(seeker, hide_phone=False),
+                caption="🛂 <b>Yangi ariza moderatsiyada</b>\n\n"
+                + seeker_card(seeker, hide_phone=False)
+                + candidate_test_result_suffix(int(row_get(seeker, "id"))),
                 reply_markup=seeker_moderation_keyboard(int(row_get(seeker, "id"))),
             )
             db.save_moderation_message(
@@ -1220,14 +1222,19 @@ async def test_sync_worker(bot: Bot) -> None:
 
 
 async def on_test_result(saved_row: dict[str, Any], payload: dict[str, Any]) -> None:
-    """Natija API dan chaqiriladi: nomzodga xabar + kanalga e'lon."""
+    """Natija API dan chaqiriladi.
+
+    Oqim: test yakunlandi → (1) nomzodga natija ko'rsatiladi →
+    (2) ariza natija bilan birga ADMIN moderatsiyasiga yuboriladi.
+    Kanalga e'lon faqat admin TASDIQLAGANDAN keyin bo'ladi (mod_seeker approve).
+    """
     telegram_id = payload.get("telegram_id")
     if _RESULT_BOT is None:
         return
     status = str(payload.get("status", "")).lower()
     test_title = saved_row.get("test_title") or "Test"
 
-    # 1) Nomzodga shaxsiy xabar
+    # 1) Nomzodga shaxsiy xabar (o'z natijasini ko'radi)
     if telegram_id:
         text = (
             "📊 <b>Test natijangiz keldi!</b>\n\n"
@@ -1236,44 +1243,71 @@ async def on_test_result(saved_row: dict[str, Any], payload: dict[str, Any]) -> 
             f"✅ To'g'ri: {esc(payload.get('correct_answers'))}/{esc(payload.get('total_questions'))}\n"
             f"❌ Noto'g'ri: {esc(payload.get('wrong_answers'))}\n"
             f"{test_result_status_text(status)}\n\n"
-            "Batafsil ma'lumotni <b>📄 Mening arizam</b> bo'limida ko'rishingiz mumkin."
+            "Arizangiz endi admin tekshiruviga yuborildi. Tasdiqlangach xabar beramiz."
         )
         try:
             await _RESULT_BOT.send_message(int(telegram_id), text)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Nomzodga natija xabarini yuborib bo'lmadi: %s", exc)
 
-    # 2) Natijani kanalga e'lon qilamiz (ma'lumotlari bilan)
-    await post_test_result_to_channel(saved_row, payload, status)
+    # 2) Test yakunlandi — endi arizani natija bilan birga adminga yuboramiz.
+    await _submit_application_to_admin_after_test(payload)
 
 
-async def post_test_result_to_channel(
-    saved_row: dict[str, Any], payload: dict[str, Any], status: str
-) -> None:
-    """Test natijasini natija kanaliga (yoki maxfiy kanalga) e'lon qiladi."""
-    channel = TEST_RESULT_CHANNEL_ID
-    if not channel or _RESULT_BOT is None:
+async def _submit_application_to_admin_after_test(payload: dict[str, Any]) -> None:
+    """Test yakunlangach arizani (agar hali yuborilmagan bo'lsa) admin moderatsiyasiga
+    yuboradi. Duplicate natija kelsa qayta yubormaydi."""
+    candidate_id = payload.get("candidate_id")
+    if not candidate_id or _RESULT_BOT is None:
         return
-    seeker = db.get_seeker(int(payload["candidate_id"])) if payload.get("candidate_id") else None
-    name = clean_text(row_get(seeker, "full_name"), "Nomzod") if seeker else "Nomzod"
-    profession = clean_text(row_get(seeker, "profession_title"), "-") if seeker else "-"
-    passed = status in ("passed", "pass", "true", "1")
-    text = (
+    seeker = db.get_seeker(int(candidate_id))
+    if not seeker:
+        return
+    if clean_text(row_get(seeker, "moderation_status"), "pending") != "pending":
+        return  # allaqachon tasdiqlangan/rad etilgan
+    if db.list_moderation_messages("seeker", int(candidate_id)):
+        return  # allaqachon adminga yuborilgan (duplicate natija)
+    try:
+        await send_seeker_moderation_to_admins(_RESULT_BOT, seeker)
+        system_log("TEST_RESULT_RECEIVED", int(candidate_id), "ariza test natijasi bilan adminga yuborildi")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Test'dan keyin arizani adminga yuborib bo'lmadi: %s", exc)
+
+
+def test_result_channel_text(seeker: Any, test_row: Any) -> str:
+    """Kanalga joylash uchun test natijasi matni (to'liq ma'lumot bilan)."""
+    passed = clean_text(row_get(test_row, "status"), "").lower() in ("passed",) or \
+        clean_text(row_get(test_row, "result_status"), "").lower() == "passed"
+    return (
         "🧪 <b>Test natijasi</b>\n"
         "━━━━━━━━━━━━━━\n"
-        f"👤 Nomzod: {esc(name)}\n"
-        f"💼 Kasb: {esc(profession)}\n"
-        f"📝 Test: {esc(saved_row.get('test_title', 'Test'))}\n\n"
-        f"❓ Jami savollar: {esc(payload.get('total_questions'))}\n"
-        f"✅ To'g'ri: {esc(payload.get('correct_answers'))}\n"
-        f"❌ Noto'g'ri: {esc(payload.get('wrong_answers'))}\n"
-        f"🎯 Foiz: {fmt_percent(payload.get('percentage'))}%\n\n"
+        f"👤 Nomzod: {esc(row_get(seeker, 'full_name'))}\n"
+        f"💼 Kasb: {esc(row_get(seeker, 'profession_title'))}\n"
+        f"📝 Test: {esc(row_get(test_row, 'test_title', 'Test'))}\n\n"
+        f"❓ Jami savollar: {esc(row_get(test_row, 'total_questions'))}\n"
+        f"✅ To'g'ri: {esc(row_get(test_row, 'correct_answers'))}\n"
+        f"❌ Noto'g'ri: {esc(row_get(test_row, 'wrong_answers'))}\n"
+        f"🎯 Foiz: {fmt_percent(row_get(test_row, 'percentage'))}%\n\n"
         f"{'🟢 <b>Testdan o‘tdi</b>' if passed else '🔴 <b>Testdan o‘ta olmadi</b>'}"
     )
+
+
+async def post_seeker_test_result_to_channel(bot: Bot, seeker: Any) -> None:
+    """Nomzodning yakunlangan test natijasini kanalga joylaydi (admin tasdig'idan keyin)."""
+    channel = TEST_RESULT_CHANNEL_ID
+    if not channel:
+        return
+    tests = db.list_application_tests_by_candidate(int(row_get(seeker, "id")))
+    completed = next(
+        (t for t in tests if clean_text(row_get(t, "status"), "") in ("completed", "passed", "failed")),
+        None,
+    )
+    if completed is None:
+        return  # test topshirilmagan — joylanmaydi
     try:
-        await _RESULT_BOT.send_message(channel, text)
+        await bot.send_message(channel, test_result_channel_text(seeker, completed))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Natijani kanalga yuborib bo'lmadi (%s): %s", channel, exc)
+        logger.warning("Test natijasini kanalga yuborib bo'lmadi (%s): %s", channel, exc)
 
 
 # Natija notifier uchun bot nusxasi (main() da o'rnatiladi)
@@ -2055,6 +2089,8 @@ async def admin_moderate_seeker(callback: CallbackQuery, state: FSMContext, bot:
         seeker = db.get_seeker(seeker_id)
         await cleanup_moderation_requests(bot, "seeker", seeker_id, callback.from_user.id, callback.message)
         publish_error = await publish_seeker(bot, seeker)
+        # Admin tasdiqladi — test natijasini (bo'lsa) kanalga natija bilan joylaymiz.
+        await post_seeker_test_result_to_channel(bot, seeker)
         await bot.send_message(
             int(row_get(seeker, "telegram_id")),
             "✅ Arizangiz admin tomonidan tasdiqlandi.\n\nEndi mos vakansiyalar sizga yuboriladi.",
@@ -3604,23 +3640,35 @@ async def seeker_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot) -
     db.upsert_user(callback.from_user.id, callback.from_user.username, callback.from_user.full_name, "seeker")
     seeker_id = db.save_seeker(callback.from_user.id, data)
     seeker = db.get_seeker(seeker_id)
-    await send_seeker_moderation_to_admins(bot, seeker)
     await state.clear()
-    await callback.message.answer(
-        "✅ Arizangiz qabul qilindi.\n\nAriza admin tekshiruviga yuborildi. Tasdiqlangandan keyin maxfiy kanalga chiqadi va sizga mos vakansiyalar yuboriladi.",
-        reply_markup=menu_for(callback.from_user.id),
-    )
     await callback.answer()
-    # Yakuniy bosqich: kasbga (yoki umumiy) test biriktirilgan bo'lsa — tayinlaymiz.
-    try:
-        assigned = await assign_profession_test_for_seeker(bot, seeker)
-        if assigned:
-            await callback.message.answer(
-                "📝 <b>Yana bir bosqich qoldi:</b> arizangizni yakunlash uchun testdan o'ting. "
-                "Quyida test tugmasi yuborildi 👇"
-            )
-    except Exception as exc:  # noqa: BLE001 - test xatosi arizani buzmasin
-        logger.warning("Ariza testini tayinlashda xatolik (seeker=%s): %s", seeker_id, exc)
+
+    # Kasbga (yoki umumiy) test biriktirilganmi?
+    profession_id = row_get(seeker, "profession_id")
+    profession_id = int(profession_id) if profession_id not in (None, "") else None
+    test_id, _, _ = db.resolve_test_for_profession(profession_id)
+
+    if test_id and test_client.enabled:
+        # YANGI TARTIB: avval test. Adminga HOZIR yuborilmaydi —
+        # test yakunlangach natija bilan birga yuboriladi.
+        await callback.message.answer(
+            "✅ Ma'lumotlaringiz qabul qilindi.\n\n"
+            "📝 <b>Yakuniy bosqich — test.</b> Quyidagi tugma orqali testni topshiring. "
+            "Test yakunlangach arizangiz natijasi bilan birga admin tekshiruviga yuboriladi.",
+            reply_markup=menu_for(callback.from_user.id),
+        )
+        try:
+            await assign_profession_test_for_seeker(bot, seeker)  # deep-link tugmasini yuboradi
+        except Exception as exc:  # noqa: BLE001 - test xatosi arizani buzmasin
+            logger.warning("Ariza testini tayinlashda xatolik (seeker=%s): %s", seeker_id, exc)
+    else:
+        # Test yo'q — eski tartib: darhol admin tekshiruviga.
+        await send_seeker_moderation_to_admins(bot, seeker)
+        await callback.message.answer(
+            "✅ Arizangiz qabul qilindi.\n\nAriza admin tekshiruviga yuborildi. "
+            "Tasdiqlangandan keyin maxfiy kanalga chiqadi va sizga mos vakansiyalar yuboriladi.",
+            reply_markup=menu_for(callback.from_user.id),
+        )
 
 
 @router.callback_query(SeekerForm.confirm, F.data == "seeker_cancel")

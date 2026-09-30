@@ -59,6 +59,7 @@ os.environ["TEST_RESULT_API_SECRET"] = RESULT_SECRET
 os.environ["RESULT_API_HOST"] = "127.0.0.1"
 os.environ["RESULT_API_PORT"] = str(MY_PORT)
 os.environ["TEST_RESULT_CHANNEL_ID"] = "-1009999999999"   # natija kanali (test)
+os.environ["ADMIN_IDS"] = "555000"                          # test admin
 
 from database import db  # noqa: E402
 from services.test_api import test_client  # noqa: E402
@@ -73,15 +74,38 @@ def check(name: str, cond: bool, detail: str = "") -> None:
     print(f"{'✅' if cond else '❌'} {name}" + (f" — {detail}" if detail else ""), flush=True)
 
 
+class _FakeMsg:
+    class _Chat:
+        def __init__(self, cid):
+            self.id = cid
+
+    def __init__(self, cid, mid):
+        self.chat = _FakeMsg._Chat(cid)
+        self.message_id = mid
+
+
 class StubBot:
-    """Telegram mock — yuborilgan xabarlarni yozib boradi (UI qatlami)."""
+    """Telegram mock — yuborilgan xabarlarni (chat_id, text) yozib boradi."""
 
     def __init__(self):
         self.sent: list[tuple] = []
+        self._mid = 0
+
+    def _next(self, chat_id):
+        self._mid += 1
+        return _FakeMsg(chat_id, self._mid)
 
     async def send_message(self, chat_id, text, *args, **kwargs):
         self.sent.append((chat_id, text))
-        return None
+        return self._next(chat_id)
+
+    async def send_photo(self, chat_id, *args, caption="", **kwargs):
+        self.sent.append((chat_id, caption))
+        return self._next(chat_id)
+
+    async def send_document(self, chat_id, *args, caption="", **kwargs):
+        self.sent.append((chat_id, caption))
+        return self._next(chat_id)
 
 
 def spawn_dorikent() -> subprocess.Popen:
@@ -160,7 +184,7 @@ async def run() -> None:
         "profession_title": "Farmatsevt", "experience": "2 yil", "previous_job": "Dorixona",
         "salary": "4 000 000",
     })
-    db.set_seeker_moderation_status(seeker_id, "approved")
+    # Nomzod 'pending' — YANGI TARTIB: avval test, keyin admin (tasdiqlamaymiz).
 
     # 4) REAL HTTP: testlar ro'yxati
     tests = await test_client.get_tests()
@@ -213,13 +237,32 @@ async def run() -> None:
         check("candidate/test to'g'ri bog'landi",
               int(saved["candidate_id"]) == seeker_id and int(saved["test_id"]) == int(e2e_test["id"]))
 
-    # 8) Natija KANALGA e'lon qilindimi (ma'lumotlari bilan)?
-    channel_msgs = [t for cid, t in stub.sent if str(cid) == os.environ["TEST_RESULT_CHANNEL_ID"]]
-    channel_ok = any(("Test natijasi" in t and "66.7" in t and "Noto'g'ri" in t) for t in channel_msgs)
-    check("natija kanalga e'lon qilindi (nom, to'g'ri/noto'g'ri, foiz)", channel_ok,
-          (channel_msgs[0].replace(chr(10), " ")[:90] if channel_msgs else "kanalga xabar yo'q"))
+    await asyncio.sleep(0.8)  # notifier (adminga yuborish) tugashini kutamiz
 
-    # 9) "Mening arizam" ko'rinishida natija matni chiqadimi
+    # 8) YANGI TARTIB: test yakunlangach ariza ADMINGA yuborilgan bo'lishi kerak
+    #    (kanalga hali EMAS — faqat admin tasdig'idan keyin).
+    admin_msgs = [t for cid, t in stub.sent if str(cid) == "555000"]
+    check("test yakunlangach ariza ADMINGA yuborildi (natija bilan)",
+          any("moderatsiya" in t.lower() and "66.7" in t for t in admin_msgs),
+          (admin_msgs[0].replace(chr(10), " ")[:80] if admin_msgs else "adminga xabar yo'q"))
+    check("moderatsiya yozuvi saqlandi",
+          len(db.list_moderation_messages("seeker", seeker_id)) >= 1)
+    channel_before = [t for cid, t in stub.sent if str(cid) == os.environ["TEST_RESULT_CHANNEL_ID"]]
+    check("tasdiqdan OLDIN kanalga natija tushmagan",
+          not any("Test natijasi" in t for t in channel_before))
+    _srow = db.get_seeker(seeker_id)
+    _sstatus = _srow["moderation_status"] if _srow else "?"
+    check("nomzod hali 'pending' (avtomatik tasdiqlanmagan)", _sstatus == "pending", _sstatus)
+
+    # 9) Admin TASDIQLAYDI → natija bilan birga kanalga joylanadi
+    db.set_seeker_moderation_status(seeker_id, "approved")
+    await main.post_seeker_test_result_to_channel(stub, db.get_seeker(seeker_id))
+    channel_after = [t for cid, t in stub.sent if str(cid) == os.environ["TEST_RESULT_CHANNEL_ID"]]
+    channel_ok = any(("Test natijasi" in t and "66.7" in t and "Noto'g'ri" in t) for t in channel_after)
+    check("admin tasdig'idan keyin natija kanalga joylandi (nom/to'g'ri/noto'g'ri/foiz)", channel_ok,
+          (channel_after[-1].replace(chr(10), " ")[:90] if channel_after else "kanalga xabar yo'q"))
+
+    # 10) "Mening arizam" ko'rinishida natija matni chiqadimi
     block = main.candidate_tests_block(seeker_id)
     check("Mening arizam natijani ko'rsatadi", "66.7%" in block and "o'ta olmadi" in block.lower(),
           block.replace("\n", " ")[:80])

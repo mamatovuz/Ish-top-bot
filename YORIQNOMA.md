@@ -10,12 +10,17 @@ uchun tayyor.
 
 - Testlarning o'zi **DoriKent Test Bot**da tayyorlanadi (savollar, javoblar, o'tish bali).
 - Ish Topish Bot esa faqat **qaysi testni** nomzodga berishni belgilaydi.
-- Nomzod ish topish botida **ariza yuboradi va kasbini tanlaydi**.
-- O'sha kasbga test biriktirilgan bo'lsa — nomzodga **o'sha test** beriladi.
-- Kasbga test biriktirilmagan bo'lsa — **yakuniy (umumiy) test** beriladi.
-- Test tugagach, natija **kanalga** tushadi va nomzodning arizasida ko'rinadi.
+- Test **kasbga** biriktiriladi (har kasbga 1 ta), yoki bitta **yakuniy (umumiy) test** bo'ladi.
 
-> Qisqasi: **Kasbga test → bo'lmasa → Yakuniy test.**
+**Jarayon tartibi (muhim):**
+1. Nomzod **ma'lumotlarini kiritadi** va **kasbini tanlaydi**.
+2. Darhol **testni topshiradi** (bu — arizaning yakuniy bosqichi).
+3. Test tugagach **natija** hisoblanadi va nomzodga ko'rsatiladi.
+4. Ariza **natijasi bilan birga ADMINGA** yuboriladi.
+5. Admin **tasdiqlasa** → nomzod va uning **test natijasi kanalga** joylanadi.
+
+> Qisqasi: **Ma'lumot → Test → Natija → Admin tasdig'i → Kanal.**
+> Test biriktirish qoidasi: **Kasbga test → bo'lmasa → Yakuniy test.**
 
 ---
 
@@ -61,34 +66,34 @@ uchun tayyor.
 ## 4. Nomzod (mijoz) uchun jarayon
 
 1. Nomzod botda **👨‍💼 Ishga ariza topshirish** tugmasini bosadi.
-2. Ma'lumotlarini kiritadi va **kasbini tanlaydi** (Sotuvchi, Dizayner, ...).
-3. Arizani tasdiqlaydi.
-4. Agar shu kasbga (yoki umumiy) test biriktirilgan bo'lsa, nomzodga darhol xabar keladi:
-   > 📝 **Arizangizning yakuniy bosqichi — test!**
-   > 📚 Test: *...*
+2. Ma'lumotlarini kiritadi va **kasbini tanlaydi** (Sotuvchi, Dizayner, ...) va tasdiqlaydi.
+3. Agar shu kasbga (yoki umumiy) test biriktirilgan bo'lsa, darhol xabar keladi:
+   > ✅ Ma'lumotlaringiz qabul qilindi.
+   > 📝 **Yakuniy bosqich — test.** Test yakunlangach arizangiz admin tekshiruviga yuboriladi.
    > [📝 Testni boshlash]
-5. Nomzod **📝 Testni boshlash** tugmasini bosadi → DoriKent boti ochiladi → testni ishlaydi.
-6. Test tugagach natija avtomatik qaytadi.
+4. Nomzod **📝 Testni boshlash** tugmasini bosadi → DoriKent boti ochiladi → testni ishlaydi.
+5. Test tugagach **natijasini darhol ko'radi** (foizi, to'g'ri/noto'g'ri).
+6. Shundan **keyin** arizasi natija bilan birga **adminga** yuboriladi.
 
-> Nomzod savollarni faqat DoriKent botida ishlaydi. Ish Topish bot savollarni ko'rsatmaydi.
+> ⚠️ Muhim: test topshirilmaguncha ariza adminga **bormaydi**. Test — majburiy yakuniy bosqich.
+> Nomzod savollarni faqat DoriKent botida ishlaydi; Ish Topish bot savollarni ko'rsatmaydi.
 
 ---
 
-## 5. Natija qayerda ko'rinadi?
+## 5. Admin va natija
 
-Test tugagach natija **3 joyda** paydo bo'ladi:
+1. Test tugagach ariza **admin**ga keladi — nomzod ma'lumoti **+ test natijasi** bilan.
+2. Admin **✅ Tasdiqlash** yoki **❌ Rad etish** qiladi.
+3. **Tasdiqlagach:**
+   - Nomzod maxfiy kanalga chiqadi va unga mos vakansiyalar yuboriladi.
+   - **Test natijasi kanalga** to'liq joylanadi:
+     > 🧪 **Test natijasi**
+     > 👤 Nomzod: Ali Valiyev · 💼 Kasb: Sotuvchi · 📝 Test: Мижоз билан ишлаш
+     > ❓ Jami: 20 · ✅ To'g'ri: 17 · ❌ Noto'g'ri: 3 · 🎯 Foiz: 85% · 🟢 O'tdi
+4. Nomzod o'z natijasini **📄 Mening arizam** bo'limida ham ko'radi.
 
-1. **Nomzodga** shaxsiy xabar keladi (foizi, to'g'ri/noto'g'ri javoblari bilan).
-2. **📄 Mening arizam** bo'limida nomzod o'z natijasini ko'radi.
-3. **Kanalga** to'liq natija tushadi:
-   > 🧪 **Test natijasi**
-   > 👤 Nomzod: Ali Valiyev
-   > 💼 Kasb: Sotuvchi
-   > 📝 Test: Мижоз билан ишлаш
-   > ❓ Jami savollar: 20 · ✅ To'g'ri: 17 · ❌ Noto'g'ri: 3 · 🎯 Foiz: 85%
-   > 🟢 Testdan o'tdi
-
-Admin nomzodlar ro'yxatida ham (👥 Nomzodlar) va Excel eksportda ham test natijasi ko'rinadi.
+> Rad etilsa — kanalga hech narsa joylanmaydi. Natija faqat **admin tasdig'idan keyin** chiqadi.
+> Admin **👥 Nomzodlar** ro'yxatida va **Excel eksport**da ham test natijasi ko'rinadi.
 
 ---
 
